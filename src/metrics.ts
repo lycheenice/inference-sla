@@ -376,6 +376,32 @@ export function perDpValues(store: MetricsStore, name: string): { dp: string; va
   return out
 }
 
+export function perDpL1HitRate(
+  store: MetricsStore,
+  metric: string,
+  cacheMode: string,
+  computeMode: string,
+): { dp: string; value: number }[] {
+  const cache = new Map<string, { dp: string; value: number }>()
+  const compute = new Map<string, { dp: string; value: number }>()
+  for (const l of store.lines(metric)) {
+    const dp = l.labels["dp_rank"] ?? "*"
+    const mode = l.labels["mode"]
+    if (mode === cacheMode && !cache.has(dp)) cache.set(dp, { dp, value: l.value })
+    else if (mode === computeMode && !compute.has(dp)) compute.set(dp, { dp, value: l.value })
+  }
+  const dps = new Set<string>([...cache.keys(), ...compute.keys()])
+  const out: { dp: string; value: number }[] = []
+  for (const dp of dps) {
+    const c = cache.get(dp)?.value ?? 0
+    const cc = compute.get(dp)?.value ?? 0
+    const total = c + cc
+    out.push({ dp, value: total > 0 ? c / total : 0 })
+  }
+  out.sort((a, b) => Number(a.dp) - Number(b.dp))
+  return out
+}
+
 export interface SlaSnapshot {
   ts: number
   running: number
@@ -394,6 +420,9 @@ export interface SlaSnapshot {
   totalRequests: number
   abortedRequests: number
   l1HitRate: number
+  l1HitRateGauge: number
+  l1PrefillCacheTokens: number
+  l1PrefillComputeTokens: number
   l2Usage: number
   l2UsedTokens: number
   l2TotalTokens: number
@@ -407,6 +436,7 @@ export interface SlaSnapshot {
     queued: { dp: string; value: number }[]
     gen: { dp: string; value: number }[]
     cache: { dp: string; value: number }[]
+    l1: { dp: string; value: number }[]
     kv: { dp: string; value: number }[]
   }
   fetchError: string | null
@@ -444,7 +474,17 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): S
   const totalRequests = store.counterValue("sglang:num_requests_total")
   const abortedRequests = store.counterValue("sglang:num_aborted_requests_total")
 
-  const l1HitRate = avgOverDp(store, "sglang:cache_hit_rate")
+  const l1HitRateGauge = avgOverDp(store, "sglang:cache_hit_rate")
+  const l1PrefillCacheTokens = store.sumGauge(
+    "sglang:realtime_tokens_total",
+    (l) => l["mode"] === "prefill_cache",
+  )
+  const l1PrefillComputeTokens = store.sumGauge(
+    "sglang:realtime_tokens_total",
+    (l) => l["mode"] === "prefill_compute",
+  )
+  const l1Total = l1PrefillCacheTokens + l1PrefillComputeTokens
+  const l1HitRate = l1Total > 0 ? l1PrefillCacheTokens / l1Total : l1HitRateGauge
   const l2UsedTokens = sumOverDp(store, "sglang:hicache_host_used_tokens")
   const l2TotalTokens = sumOverDp(store, "sglang:hicache_host_total_tokens")
   const l2Usage = l2TotalTokens > 0 ? l2UsedTokens / l2TotalTokens : 0
@@ -472,6 +512,9 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): S
     totalRequests,
     abortedRequests,
     l1HitRate,
+    l1HitRateGauge,
+    l1PrefillCacheTokens,
+    l1PrefillComputeTokens,
     l2Usage,
     l2UsedTokens,
     l2TotalTokens,
@@ -485,6 +528,12 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): S
       queued: perDpValues(store, "sglang:num_queue_reqs"),
       gen: perDpValues(store, "sglang:gen_throughput"),
       cache: perDpValues(store, "sglang:cache_hit_rate"),
+      l1: perDpL1HitRate(
+        store,
+        "sglang:realtime_tokens_total",
+        "prefill_cache",
+        "prefill_compute",
+      ),
       kv: perDpValues(store, "sglang:token_usage"),
     },
     fetchError: null,

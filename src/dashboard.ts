@@ -322,14 +322,15 @@ ${bold("Cached host")}   ${fg("#cbd5e1")(fmtNum(s.cachedHostTokens) + " tok")}
     const l2Color = s.l2Usage >= 0.9 ? red : s.l2Usage >= 0.7 ? yellow : green
     const kvColor = s.kvUsage >= 0.9 ? red : s.kvUsage >= 0.7 ? yellow : green
     return t`
-${bold("L1 (GPU radix)")} ${l1Color(bold(fmtPct(s.l1HitRate)))}
+${bold("L1 (GPU radix) hit")} ${l1Color(bold(fmtPct(s.l1HitRate)))}
+${fg("#64748b")("  cache/cache+compute")}
+${fg("#64748b")("  prefill_cache ")} ${fg("#94a3b8")(fmtNum(s.l1PrefillCacheTokens))}
+${fg("#64748b")("  prefill_compute")} ${fg("#94a3b8")(fmtNum(s.l1PrefillComputeTokens))}
+${fg("#64748b")("  gauge ")} ${fg("#475569")(fmtPct(s.l1HitRateGauge))}
 ${bold("L2 (host) used")} ${l2Color(bold(fmtPct(s.l2Usage)))}
 ${fg("#64748b")("L2 tokens")} ${fg("#94a3b8")(fmtNum(s.l2UsedTokens) + " / " + fmtNum(s.l2TotalTokens))}
 ${fg("#64748b")("────")}
 ${bold("KV usage")}      ${kvColor(bold(fmtPct(s.kvUsage)))}
-${fg("#64748b")("────")}
-${fg("#475569")("L1 = sglang:cache_hit_rate")}
-${fg("#475569")("L2 = hicache_host occupancy")}
 `
   }
 
@@ -349,7 +350,7 @@ ${fg("#64748b")("token per forward pass)")}
       s.perDp.running.length,
       s.perDp.queued.length,
       s.perDp.gen.length,
-      s.perDp.cache.length,
+      s.perDp.l1.length,
       s.perDp.kv.length,
     )
     const chunks: TextChunk[] = [bold(fg("#94a3b8")("DP   run  que  gen   L1%  KV%\n"))]
@@ -358,10 +359,10 @@ ${fg("#64748b")("token per forward pass)")}
       const run = s.perDp.running[i]?.value ?? 0
       const que = s.perDp.queued[i]?.value ?? 0
       const gen = s.perDp.gen[i]?.value ?? 0
-      const cache = s.perDp.cache[i]?.value ?? 0
+      const l1 = s.perDp.l1[i]?.value ?? 0
       const kv = s.perDp.kv[i]?.value ?? 0
       const runColor = run >= s.maxRunning ? red : run > s.maxRunning * 0.8 ? yellow : green
-      const cacheColor = cache >= 0.5 ? green : cache >= 0.2 ? yellow : red
+      const l1Color = l1 >= 0.5 ? green : l1 >= 0.2 ? yellow : red
       const kvColor = kv >= 0.9 ? red : kv >= 0.7 ? yellow : green
       const sep = fg("#475569")("  ")
       const nl = i === dpCount - 1 ? "" : "\n"
@@ -373,7 +374,7 @@ ${fg("#64748b")("token per forward pass)")}
         sep,
         cyan(gen.toFixed(0).padStart(4)),
         sep,
-        cacheColor((cache * 100).toFixed(0).padStart(3)),
+        l1Color((l1 * 100).toFixed(0).padStart(3)),
         sep,
         kvColor((kv * 100).toFixed(0).padStart(3)),
         fg("#334155")(nl),

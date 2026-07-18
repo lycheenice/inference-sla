@@ -20,12 +20,16 @@ sglang:num_queue_reqs{dp_rank="0",engine_type="unified",model_name="glm",tp_rank
 sglang:num_queue_reqs{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="1"} 3.0
 sglang:num_queue_reqs{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 1.0
 sglang:num_queue_reqs{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="3"} 1.0
-sglang:cache_hit_rate{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.6
-sglang:cache_hit_rate{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="1"} 0.6
-sglang:cache_hit_rate{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 0.4
-sglang:cache_hit_rate{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="3"} 0.4
+sglang:cache_hit_rate{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.0
+sglang:cache_hit_rate{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="1"} 0.0
+sglang:cache_hit_rate{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 0.0
+sglang:cache_hit_rate{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="3"} 0.0
 sglang:token_usage{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.10
 sglang:token_usage{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 0.20
+sglang:realtime_tokens_total{dp_rank="0",engine_type="unified",mode="prefill_cache",model_name="glm",tp_rank="0"} 900.0
+sglang:realtime_tokens_total{dp_rank="0",engine_type="unified",mode="prefill_compute",model_name="glm",tp_rank="0"} 100.0
+sglang:realtime_tokens_total{dp_rank="1",engine_type="unified",mode="prefill_cache",model_name="glm",tp_rank="2"} 800.0
+sglang:realtime_tokens_total{dp_rank="1",engine_type="unified",mode="prefill_compute",model_name="glm",tp_rank="2"} 200.0
 sglang:gen_throughput{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 100.0
 sglang:gen_throughput{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 50.0
 sglang:http_requests_active{endpoint="/v1/chat/completions",method="POST"} 1.0
@@ -160,11 +164,15 @@ describe("buildSnapshot", () => {
     expect(snap.abortedRequests).toBe(7)
   })
 
-  test("averages cache hit rate across DP", () => {
+  test("computes L1 hit rate from realtime_tokens (prefill_cache / cache+compute)", () => {
     const store = new MetricsStore()
     store.ingest(SAMPLE)
     const snap = buildSnapshot(store, null)
-    expect(snap.l1HitRate).toBeCloseTo(0.5, 5)
+    // gauge is 0 in fixture; real L1 = (900+800) / (900+800+100+200) = 0.85
+    expect(snap.l1HitRateGauge).toBe(0)
+    expect(snap.l1HitRate).toBeCloseTo(0.85, 5)
+    expect(snap.l1PrefillCacheTokens).toBeCloseTo(1700, 5)
+    expect(snap.l1PrefillComputeTokens).toBeCloseTo(300, 5)
   })
 
   test("computes KV usage average", () => {
@@ -234,6 +242,11 @@ describe("buildSnapshot", () => {
     expect(snap.perDp.running[0].value).toBe(2)
     expect(snap.perDp.running[1].dp).toBe("1")
     expect(snap.perDp.running[1].value).toBe(0)
+    expect(snap.perDp.l1.length).toBe(2)
+    expect(snap.perDp.l1[0].dp).toBe("0")
+    expect(snap.perDp.l1[0].value).toBeCloseTo(0.9, 5) // 900/(900+100)
+    expect(snap.perDp.l1[1].dp).toBe("1")
+    expect(snap.perDp.l1[1].value).toBeCloseTo(0.8, 5) // 800/(800+200)
   })
 })
 
