@@ -85,7 +85,7 @@ export class Dashboard {
 
     this.header = new TextRenderable(this.renderer, {
       id: "sla-header",
-      content: t`${bold(fg("#7dd3fc")("sglang-sla"))} ${fg("#64748b")("· SLA dashboard for sglang serving")}`,
+      content: t`${bold(fg("#7dd3fc")("inference-sla"))} ${fg("#64748b")("· SLA dashboard for LLM inference serving")}`,
       fg: RGBA.fromInts(226, 232, 240),
       attributes: TextAttributes.BOLD,
       width: "auto",
@@ -234,7 +234,7 @@ export class Dashboard {
     const ts = now.toLocaleTimeString()
     const err = s.fetchError
 
-    this.header.content = t`${bold(fg("#7dd3fc")("sglang-sla"))} ${fg("#64748b")("· SLA dashboard for sglang serving")}`
+    this.header.content = t`${bold(fg("#7dd3fc")("inference-sla"))} ${fg("#64748b")("· SLA dashboard for LLM inference serving")}`
     this.subHeader.content = t`${fg("#94a3b8")("endpoint:")} ${fg("#cbd5e1")(this.opts.endpoint)}  ${fg("#94a3b8")("refresh:")} ${fg("#cbd5e1")(this.opts.refreshMs + "ms")}  ${fg("#94a3b8")("q/Ctrl+C: quit")}`
 
     if (err) {

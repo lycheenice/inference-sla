@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sglang-sla 一键启动脚本
+# inference-sla 一键启动脚本
 # 用法: ./start.sh [metrics_url] [refresh_ms]
 set -euo pipefail
 

@@ -1,12 +1,12 @@
 {
-  "name": "sglang-sla",
+  "name": "inference-sla",
   "version": "0.1.0",
-  "description": "Terminal SLA dashboard for sglang serving (concurrency, TTFT/TPOT percentiles, throughput, cache hit rates) built on OpenTUI",
+  "description": "Terminal SLA dashboard for LLM inference serving (concurrency, TTFT/TPOT percentiles, throughput, cache hit rates) built on OpenTUI; currently targets sglang",
   "type": "module",
   "module": "src/main.ts",
   "main": "src/main.ts",
   "bin": {
-    "sglang-sla": "src/main.ts"
+    "inference-sla": "src/main.ts"
   },
   "scripts": {
     "dev": "bun src/main.ts",

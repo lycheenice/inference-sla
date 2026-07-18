@@ -1,8 +1,8 @@
-# sglang-sla
+# inference-sla
 
-Terminal SLA dashboard for [sglang](https://github.com/sgl-project/sglang) serving, built on [OpenTUI](https://github.com/anomalyco/opentui).
+Terminal SLA dashboard for LLM inference serving, built on [OpenTUI](https://github.com/anomalyco/opentui).
 
-Live, in-terminal view of request concurrency, latency percentiles (TTFT / TPOT / E2E / queue wait), output throughput, and cache hit rates — pulling directly from sglang's Prometheus `/metrics` endpoint, no sidecar required.
+Live, in-terminal view of request concurrency, latency percentiles (TTFT / TPOT / E2E / queue wait), output throughput, and cache hit rates — pulling directly from the serving engine's Prometheus `/metrics` endpoint, no sidecar required. Currently targets [sglang](https://github.com/sgl-project/sglang); vLLM support is planned.
 
 ## Features
 
@@ -26,8 +26,8 @@ Threshold-based color coding: green / yellow / red for capacity, latency, and ca
 ## Install
 
 ```bash
-git clone <this-repo> sglang-sla
-cd sglang-sla
+git clone <this-repo> inference-sla
+cd inference-sla
 bun install
 ```
 

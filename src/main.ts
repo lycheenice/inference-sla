@@ -35,7 +35,7 @@ function parseArgs(argv: string[]): { endpoint: string; refreshMs: number } {
 }
 
 function printHelp(): void {
-  console.log(`sglang-sla — terminal SLA dashboard for sglang serving
+  console.log(`inference-sla — terminal SLA dashboard for LLM inference serving
 
 Usage:
   bun src/main.ts [endpoint] [refresh_ms]
