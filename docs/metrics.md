@@ -112,7 +112,7 @@ sglang 暴露的指标通常带以下标签，本工具按这些标签做聚合 
 
 ## 四、缓存（Cache）
 
-对应 `SlaSnapshot` 字段：`l1HitRate` / `l1HitRateGauge` / `l1PrefillCacheTokens` / `l1PrefillComputeTokens` / `l2Usage` / `l2UsedTokens` / `l2TotalTokens` / `kvUsage`。
+对应 `SlaSnapshot` 字段：`l1HitRate` / `l1HitRateGauge` / `l1PrefillCacheTokens` / `l1PrefillComputeTokens` / `l2Usage` / `l2UsedTokens` / `l2TotalTokens` / `evictedTokensTotal` / `loadBackTokensTotal` / `evictedTokenRate` / `loadBackTokenRate` / `kvUsage`。
 对应仪表盘面板：**CACHE**。
 
 ### 4.1 L1（GPU radix cache）命中率
@@ -138,7 +138,22 @@ sglang 暴露的指标通常带以下标签，本工具按这些标签做聚合 
 
 **颜色阈值**：≥0.9 红，≥0.7 黄，否则绿。
 
-### 4.3 KV cache 显存使用
+### 4.3 L1↔L2 迁移（hierarchical cache token flow）
+
+| 仪表盘字段 | metric 名称 | 类型 | 标签 | 聚合方式 | 物理含义 |
+|---|---|---|---|---|---|
+| L1→L2 evict total | `sglang:evicted_tokens_total` | counter | `engine_type, model_name [, moe_ep_rank, pp_rank, tp_rank]` | `counterValue`（汇总所有样本） | 累计被从 GPU（L1）驱逐到 CPU/host（L2）的 token 数。 |
+| L1→L2 evict rate | 同上 | counter | 同上 | `counterRate`（Δ/Δt） | 单位时间内从 L1 迁出到 L2 的 token 速率（tok/s）；首采样为 0。 |
+| L2→L1 load total | `sglang:load_back_tokens_total` | counter | 同上 | `counterValue` | 累计被从 CPU/host（L2）加载回 GPU（L1）复用的 token 数。 |
+| L2→L1 load rate | 同上 | counter | 同上 | `counterRate` | 单位时间内从 L2 迁回 L1 的 token 速率（tok/s）；首采样为 0。 |
+
+> sglang 同时暴露迁移耗时直方图 `sglang:eviction_duration_seconds` / `sglang:load_back_duration_seconds`，本仪表盘当前未渲染，仅消费 token 计数与速率。
+> PD 模式下 `mergePdSnapshots` 对两端计数与速率分别求和（prefill 与 decode 各自独立迁移）。
+
+**L1→L2 evict rate 颜色阈值**：≥1000 tok/s 红，≥100 tok/s 黄，否则灰（0 时亦灰）。
+**L2→L1 load rate 颜色阈值**：>0 绿（说明 L2 在被复用），否则灰。
+
+### 4.4 KV cache 显存使用
 
 | 仪表盘字段 | metric 名称 | 类型 | 标签 | 聚合方式 | 物理含义 |
 |---|---|---|---|---|---|
@@ -220,6 +235,8 @@ sglang 暴露的指标通常带以下标签，本工具按这些标签做聚合 
 | `sglang:realtime_tokens_total{mode="prefill_compute"}` | gauge | CACHE / PER-DEGREE | `l1PrefillComputeTokens`, `perDp.l1` |
 | `sglang:hicache_host_used_tokens` | gauge | CACHE | `l2UsedTokens` |
 | `sglang:hicache_host_total_tokens` | gauge | CACHE | `l2TotalTokens` |
+| `sglang:evicted_tokens_total` | counter | CACHE | `evictedTokensTotal` (累计) / `evictedTokenRate` (Δ/Δt) |
+| `sglang:load_back_tokens_total` | counter | CACHE | `loadBackTokensTotal` (累计) / `loadBackTokenRate` (Δ/Δt) |
 | `sglang:token_usage` | gauge | CACHE / PER-DEGREE | `kvUsage`, `perDp.kv` |
 | `sglang:spec_accept_rate` | gauge | SPECULATIVE | `specAcceptRate` |
 | `sglang:spec_accept_length` | gauge | SPECULATIVE | `specAcceptLength` |
@@ -254,6 +271,7 @@ sglang 的 PD 分离部署把 prefill 与 decode 拆到两套 worker（同机或
 | `sglang:prompt_tokens_total` 速率 | >0 | >0 | 取 prefill（prefill 处理 prompt） |
 | `sglang:cache_hit_rate` / L1 命中 | >0 | 0 | 取 prefill（radix cache 在 prefill 端） |
 | `sglang:hicache_host_*` L2 | ✓ | ❌ | 取 prefill |
+| `sglang:evicted_tokens_total` / `load_back_tokens_total` | ✓ | ✓ | 计数与速率两端分别相加（各自独立迁移） |
 | `sglang:token_usage` | 0 | >0 | 取 decode（decode 端 KV 池是瓶颈） |
 | `sglang:spec_accept_*` | 0 | >0 | 取 decode |
 | `sglang:num_requests_total` / aborted | 各自计数 | 各自计数 | 取 max（避免双计同一请求） |
@@ -299,6 +317,7 @@ sglang 的 PD 分离部署把 prefill 与 decode 拆到两套 worker（同机或
 | `inputTokenRate` | 取 prefill |
 | `totalRequests` / `abortedRequests` | max(p, d) |
 | `l1HitRate` / `l1HitRateGauge` / `l2Usage` / `l2UsedTokens` / `l2TotalTokens` / `cachedDeviceTokens` / `cachedHostTokens` | 取 prefill（+ decode 加和，decode 端通常为 0） |
+| `evictedTokensTotal` / `loadBackTokensTotal` / `evictedTokenRate` / `loadBackTokenRate` | p + d 求和（两端各自的 L1↔L2 迁移独立累加） |
 | `kvUsage` / `specAcceptRate` / `specAcceptLength` | 取 decode |
 | `perStage` | `[...p.perStage, ...d.perStage]` |
 | `kvTransfer.*` | 取有样本的一端（通常 prefill 端 4 个直方图齐全，decode 端仅 bootstrap/alloc） |

@@ -12,7 +12,7 @@
 - **E2E latency** — 端到端请求延迟 p50 / p90 / p99，来自 `sglang:e2e_request_latency_seconds`。
 - **Queue wait** — 排队等待时间 p50 / p90 / p99，来自 `sglang:queue_time_seconds`，桶跨 DP 等级累加。
 - **Throughput** — 输出 tok/s（`Δ sglang:generation_tokens_total`）、输入 tok/s（`Δ sglang:prompt_tokens_total`）、汇总 `sglang:gen_throughput` gauge。
-- **Cache** — L1（GPU radix）命中率 = 跨 DP 平均 `sglang:cache_hit_rate`（PD 模式取 prefill 端）；L2（host）占用率 = `hicache_host_used_tokens / hicache_host_total_tokens`；KV 使用率 = 跨 DP 平均 `sglang:token_usage`（PD 模式取 decode 端）。
+- **Cache** — L1（GPU radix）命中率 = 跨 DP 平均 `sglang:cache_hit_rate`（PD 模式取 prefill 端）；L2（host）占用率 = `hicache_host_used_tokens / hicache_host_total_tokens`；KV 使用率 = 跨 DP 平均 `sglang:token_usage`（PD 模式取 decode 端）。**L1↔L2 迁移**：`Δ sglang:evicted_tokens_total`（L1→L2）/ `Δ sglang:load_back_tokens_total`（L2→L1）算出 tok/s 速率，并展示累计迁移量。
 - **Speculative (EAGLE)** — 跨 DP 的接受率与接受长度（PD 模式取 decode 端）。
 - **Per-Degree (DP0–DP3)** — 按 `dp_rank` 拆分的 running / queued / gen 吞吐 / L1 命中 / KV 使用率表（统一模式）。
 - **PD 模式专属面板** —
@@ -81,7 +81,7 @@ bun src/main.ts -e http://h200-2:8001/metrics -e http://h200-2:8002/metrics
 - **跨 DP 队列时间** — 每个 DP 的 histogram 桶在计算分位数前先累加成一条虚拟 histogram。
 - **NaN 处理** — 个别 gauge（如 `fwd_occupancy`）在某些状态下可能为 NaN，聚合时以 0 替代以避免下游渲染异常。
 - **HTTP 端点回退** — `http_requests_active` 优先取 `/v1/chat/completions`，其次 `/v1/completions`，最后 `/generate`。PD 下 prefill 端通常仅暴露 `/v1/completions`，回退保证 HTTP in-flight 不再误报 0。
-- **PD 模式合并** — `mergePdSnapshots(p, d)` 把 prefill 与 decode 两个 snapshot 合并为单一 `[PD-DISAGG]` 视图：用户视角指标（TTFT / TPOT / E2E / genThroughput / outputTokenRate / kvUsage / spec）取 decode 端，prefill 侧输入与缓存（inputTokenRate / L1 / L2 / cached_*）取 prefill 端，per-stage 序列拼接两端所有阶段，KV TRANSFER 直方图取有样本的一端（通常 prefill 发送方），pdQueues 按角色分别取值，kvPool 与并发/HTTP 求和。totalRequests / abortedRequests 取两端 max 以避免双计。
+- **PD 模式合并** — `mergePdSnapshots(p, d)` 把 prefill 与 decode 两个 snapshot 合并为单一 `[PD-DISAGG]` 视图：用户视角指标（TTFT / TPOT / E2E / genThroughput / outputTokenRate / kvUsage / spec）取 decode 端，prefill 侧输入与缓存（inputTokenRate / L1 / L2 / cached_* / evicted / load_back 迁移计数与速率）求和（两端各自独立迁移），per-stage 序列拼接两端所有阶段，KV TRANSFER 直方图取有样本的一端（通常 prefill 发送方），pdQueues 按角色分别取值，kvPool 与并发/HTTP 求和。totalRequests / abortedRequests 取两端 max 以避免双计。
 
 ## 项目结构
 

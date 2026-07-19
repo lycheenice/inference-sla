@@ -510,6 +510,10 @@ export interface SlaSnapshot {
   l2Usage: number
   l2UsedTokens: number
   l2TotalTokens: number
+  evictedTokensTotal: number
+  loadBackTokensTotal: number
+  evictedTokenRate: number
+  loadBackTokenRate: number
   kvUsage: number
   cachedDeviceTokens: number
   cachedHostTokens: number
@@ -660,6 +664,10 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, en
   const l2UsedTokens = sumOverDp(store, "sglang:hicache_host_used_tokens")
   const l2TotalTokens = sumOverDp(store, "sglang:hicache_host_total_tokens")
   const l2Usage = l2TotalTokens > 0 ? l2UsedTokens / l2TotalTokens : 0
+  const evictedTokensTotal = store.counterValue("sglang:evicted_tokens_total")
+  const loadBackTokensTotal = store.counterValue("sglang:load_back_tokens_total")
+  const evictedTokenRate = store.counterRate("sglang:evicted_tokens_total")
+  const loadBackTokenRate = store.counterRate("sglang:load_back_tokens_total")
   const kvUsage = safeNum(avgOverDp(store, "sglang:token_usage"))
   const cachedDeviceTokens = store.counterValue("sglang:cached_tokens_total", (l) => l["cache_source"] === "device")
   const cachedHostTokens = store.counterValue("sglang:cached_tokens_total", (l) => l["cache_source"] === "host")
@@ -720,6 +728,10 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, en
     l2Usage,
     l2UsedTokens,
     l2TotalTokens,
+    evictedTokensTotal,
+    loadBackTokensTotal,
+    evictedTokenRate,
+    loadBackTokenRate,
     kvUsage,
     cachedDeviceTokens,
     cachedHostTokens,
@@ -786,6 +798,10 @@ export function mergePdSnapshots(p: SlaSnapshot, d: SlaSnapshot): SlaSnapshot {
     l2Usage: p.l2Usage || d.l2Usage,
     l2UsedTokens: p.l2UsedTokens + d.l2UsedTokens,
     l2TotalTokens: p.l2TotalTokens + d.l2TotalTokens,
+    evictedTokensTotal: p.evictedTokensTotal + d.evictedTokensTotal,
+    loadBackTokensTotal: p.loadBackTokensTotal + d.loadBackTokensTotal,
+    evictedTokenRate: p.evictedTokenRate + d.evictedTokenRate,
+    loadBackTokenRate: p.loadBackTokenRate + d.loadBackTokenRate,
     kvUsage: d.kvUsage || p.kvUsage,
     cachedDeviceTokens: p.cachedDeviceTokens + d.cachedDeviceTokens,
     cachedHostTokens: p.cachedHostTokens + d.cachedHostTokens,

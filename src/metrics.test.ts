@@ -45,6 +45,8 @@ sglang:hicache_host_used_tokens{dp_rank="1",engine_type="unified",model_name="gl
 sglang:hicache_host_total_tokens{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 3908736.0
 sglang:cached_tokens_total{cache_source="device",engine_type="unified",model_name="glm"} 5.11430304e+09
 sglang:cached_tokens_total{cache_source="host",engine_type="unified",model_name="glm"} 1.729396096e+09
+sglang:evicted_tokens_total{engine_type="unified",model_name="glm"} 12345.0
+sglang:load_back_tokens_total{engine_type="unified",model_name="glm"} 6789.0
 sglang:spec_accept_rate{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.55
 sglang:spec_accept_length{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 1.55
 sglang:time_to_first_token_seconds_sum{engine_type="unified",model_name="glm"} 1.0e+06
@@ -193,6 +195,30 @@ describe("buildSnapshot", () => {
     expect(snap.l2Usage).toBeLessThan(0.7)
   })
 
+  test("computes L1<->L2 migration totals; rate 0 on first sample, >0 after delta", async () => {
+    const store = new MetricsStore()
+    store.ingest(SAMPLE)
+    const first = buildSnapshot(store, null)
+    expect(first.evictedTokensTotal).toBe(12345)
+    expect(first.loadBackTokensTotal).toBe(6789)
+    expect(first.evictedTokenRate).toBe(0)
+    expect(first.loadBackTokenRate).toBe(0)
+    await new Promise((r) => setTimeout(r, 50))
+    const sample2 = SAMPLE
+      .replace(
+        "sglang:evicted_tokens_total{engine_type=\"unified\",model_name=\"glm\"} 12345.0",
+        "sglang:evicted_tokens_total{engine_type=\"unified\",model_name=\"glm\"} 12445.0",
+      )
+      .replace(
+        "sglang:load_back_tokens_total{engine_type=\"unified\",model_name=\"glm\"} 6789.0",
+        "sglang:load_back_tokens_total{engine_type=\"unified\",model_name=\"glm\"} 7989.0",
+      )
+    store.ingest(sample2)
+    const second = buildSnapshot(store, first)
+    expect(second.evictedTokenRate).toBeGreaterThan(0)
+    expect(second.loadBackTokenRate).toBeGreaterThan(0)
+  })
+
   test("computes TTFT percentiles", () => {
     const store = new MetricsStore()
     store.ingest(SAMPLE)
@@ -321,6 +347,10 @@ sglang:realtime_tokens_total{engine_type="prefill",mode="prefill_compute",model_
 sglang:num_requests_total{engine_type="prefill",model_name="glm"} 13.0
 # TYPE sglang:num_aborted_requests_total counter
 sglang:num_aborted_requests_total{engine_type="prefill",model_name="glm"} 1.0
+# TYPE sglang:evicted_tokens_total counter
+sglang:evicted_tokens_total{engine_type="prefill",model_name="glm"} 1000.0
+# TYPE sglang:load_back_tokens_total counter
+sglang:load_back_tokens_total{engine_type="prefill",model_name="glm"} 2000.0
 `
 
 const DECODE_FIXTURE = `
@@ -362,6 +392,10 @@ sglang:num_decode_transfer_queue_reqs{engine_type="decode",model_name="glm",moe_
 sglang:kv_used_tokens{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 145856.0
 # TYPE sglang:max_total_num_tokens gauge
 sglang:max_total_num_tokens{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 441792.0
+# TYPE sglang:evicted_tokens_total counter
+sglang:evicted_tokens_total{engine_type="decode",model_name="glm"} 300.0
+# TYPE sglang:load_back_tokens_total counter
+sglang:load_back_tokens_total{engine_type="decode",model_name="glm"} 400.0
 `
 
 describe("PD-disaggregated mode", () => {
@@ -431,5 +465,17 @@ describe("PD-disaggregated mode", () => {
     expect(m.kvPool.usedTokens).toBe(145856)
     expect(m.endpoint).toContain("P http://p/metrics")
     expect(m.endpoint).toContain("D http://d/metrics")
+  })
+
+  test("mergePdSnapshots sums L1<->L2 migration totals across prefill+decode", () => {
+    const pStore = new MetricsStore()
+    pStore.ingest(PREFILL_FIXTURE)
+    const dStore = new MetricsStore()
+    dStore.ingest(DECODE_FIXTURE)
+    const p = buildSnapshot(pStore, null, "http://p/metrics")
+    const d = buildSnapshot(dStore, null, "http://d/metrics")
+    const m = mergePdSnapshots(p, d)
+    expect(m.evictedTokensTotal).toBe(1300)
+    expect(m.loadBackTokensTotal).toBe(2400)
   })
 })

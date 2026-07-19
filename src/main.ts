@@ -69,6 +69,8 @@ Metrics shown:
   Throughput output tok/s, input tok/s, gen throughput gauge
   Cache      L1 = sglang:cache_hit_rate (avg across DP) [prefill-side in PD]
              L2 = hicache_host occupancy (used / total) [prefill-side in PD]
+             L1<->L2 migration = evicted_tokens_total / load_back_tokens_total
+                (counter rate tok/s + cumulative totals)
              KV = sglang:token_usage (avg across DP) [decode-side in PD]
   Speculative EAGLE accept rate / accept length (decode-side in PD)
   PD Queues  prefill_bootstrap/inflight, decode_prealloc/transfer, paused/retracted
