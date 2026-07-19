@@ -226,6 +226,33 @@ describe("buildSnapshot", () => {
     expect(snap.l2Usage).toBeLessThan(0.7)
   })
 
+  test("hasL2Metrics/hasLoadBack true when metrics exposed (SAMPLE has both hicache_host and load_back)", () => {
+    const store = new MetricsStore()
+    store.ingest(SAMPLE)
+    const snap = buildSnapshot(store, null)
+    expect(snap.hasL2Metrics).toBe(true) // SAMPLE contains hicache_host_used_tokens
+    expect(snap.hasLoadBack).toBe(true) // SAMPLE contains load_back_tokens_total
+  })
+
+  test("hasL2Metrics/hasLoadBack false when L2 metrics absent (no hierarchical cache)", () => {
+    const noL2Fixture = `
+sglang:num_running_reqs{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.0
+sglang:num_queue_reqs{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.0
+sglang:gen_throughput{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.0
+sglang:cache_hit_rate{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.0
+sglang:token_usage{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.0
+sglang:num_used_tokens{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 0.0
+sglang:max_total_num_tokens{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 100000.0
+sglang:evicted_tokens_total{cache_type="RadixCache"} 100.0
+`
+    const store = new MetricsStore()
+    store.ingest(noL2Fixture)
+    const snap = buildSnapshot(store, null)
+    expect(snap.hasL2Metrics).toBe(false)
+    expect(snap.hasLoadBack).toBe(false)
+    expect(snap.evictedTokensTotal).toBe(100) // still exposed, just no L2 destination
+  })
+
   test("computes L1 (GPU) capacity & usage from num_used/max_total", () => {
     const store = new MetricsStore()
     store.ingest(SAMPLE)
@@ -608,5 +635,22 @@ describe("PD-disaggregated mode", () => {
     expect(m.l1UsedTokens).toBe(50000 + 160000)
     expect(m.l1TotalTokens).toBe(441792 + 441792)
     expect(m.l1Usage).toBeCloseTo((50000 + 160000) / (441792 + 441792), 5)
+  })
+
+  test("mergePdSnapshots ORs hasL2Metrics/hasLoadBack (fixtures have load_back but no hicache_host)", () => {
+    const pStore = new MetricsStore()
+    pStore.ingest(PREFILL_FIXTURE)
+    const dStore = new MetricsStore()
+    dStore.ingest(DECODE_FIXTURE)
+    const p = buildSnapshot(pStore, null, "http://p/metrics")
+    const d = buildSnapshot(dStore, null, "http://d/metrics")
+    const m = mergePdSnapshots(p, d)
+    // PREFILL/DECODE fixtures contain load_back_tokens_total but NOT hicache_host_*
+    expect(p.hasL2Metrics).toBe(false)
+    expect(d.hasL2Metrics).toBe(false)
+    expect(m.hasL2Metrics).toBe(false)
+    expect(p.hasLoadBack).toBe(true)
+    expect(d.hasLoadBack).toBe(true)
+    expect(m.hasLoadBack).toBe(true)
   })
 })

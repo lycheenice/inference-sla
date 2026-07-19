@@ -149,4 +149,61 @@ sglang 未暴露 `kv_transfer_total_mb_total` 这样的持续 counter。但 `sgl
 
 ## Feature 3: CACHE 面板动态隐藏未暴露的 L2 指标
 
-（待 F2 交付后补充本节）
+### 问题
+
+探测确认 h200-2 sglang **未启用 `--enable-hierarchical-cache`**，下列指标在 prefill/decode 端点都不存在：
+
+- `sglang:hicache_host_used_tokens` / `hicache_host_total_tokens`
+- `sglang:load_back_tokens_total`
+- `sglang:cached_tokens_total{cache_source="host"}`
+
+但当前 CACHE 面板硬编码渲染这些行，永远显示 0：
+
+```
+L2 (host) used  0.00%
+L2 tokens       0 / 0
+L1→L2 evict     0 tok/s  (87287296 tok)   ← 误导：evicted 是 L1 radix 自驱逐，非迁移到 L2
+L2→L1 load      0 tok/s  (0 tok)          ← 永远 0，metric 不存在
+```
+
+**误导点**：
+
+1. "L2 (host) used 0.00%" / "L2 tokens 0/0"：暗示 L2 存在但空，实际 L2 根本未启用
+2. "L2→L1 load 0 tok/s (0 tok)"：永远 0，无意义
+3. "L1→L2 evict" 标签：`evicted_tokens_total{cache_type="RadixCache"}` 是 GPU radix 缓存的驱逐计数，未启用 L2 时这些 token 直接丢弃（内存释放），并非迁移到 L2 host pool。只有启用 hierarchical cache 时才是 L1→L2 迁移
+
+### 设计
+
+在 `buildSnapshot` 检测指标是否暴露，`SlaSnapshot` 新增两个布尔标志：
+
+- `hasL2Metrics: boolean` —— `store.lines("sglang:hicache_host_used_tokens").length > 0`
+- `hasLoadBack: boolean` —— `store.lines("sglang:load_back_tokens_total").length > 0`
+
+dashboard `renderCache` 根据标志动态渲染：
+
+1. **L2 块（L2 used / L2 tokens）**：`hasL2Metrics` 为真才显示；否则显示一行 `fg("#475569")("L2 (host) — not enabled (--enable-hierarchical-cache)")`
+2. **L2→L1 load 行**：`hasLoadBack` 为真才显示
+3. **L1→L2 evict 行标签**：`hasL2Metrics` 为真 → "L1→L2 evict"（迁移语义）；为假 → "L1 evict"（radix 自驱逐语义）
+4. **L1 容量行（L1 used / L1 tokens）**：始终显示（`num_used_tokens`/`max_total_num_tokens` 已确认暴露）
+5. **evict 行本身**：始终显示（`evicted_tokens_total` 已确认暴露）
+
+`mergePdSnapshots`：`hasL2Metrics = p.hasL2Metrics || d.hasL2Metrics`，`hasLoadBack = p.hasLoadBack || d.hasLoadBack`（任一端有则视为启用）。
+
+### 改动点
+
+1. `src/metrics.ts` `SlaSnapshot` 新增 `hasL2Metrics: boolean` / `hasLoadBack: boolean`
+2. `buildSnapshot` 检测 `store.lines(...).length > 0` 填充
+3. `mergePdSnapshots` 取两端 OR
+4. `src/dashboard.ts` `renderCache` 条件渲染 + 标签动态切换
+5. 无新格式化器
+
+### 测试设计
+
+1. 现有 `SAMPLE` fixture 含 `hicache_host_*` → `hasL2Metrics=true`
+2. 新建无 L2 的极简 fixture → `hasL2Metrics=false`、`hasLoadBack=false`
+3. `PREFILL_FIXTURE` / `DECODE_FIXTURE` 不含 `hicache_host_*` 不含 `load_back_tokens_total` → 两个标志为 false
+4. `mergePdSnapshots`：两端都 false → 合并 false；任一端 true → 合并 true（新增一个带 L2 的 prefill fixture 变体验证）
+
+### 验证
+
+`bun run typecheck` + `bun run lint` + `bun test`。生产端点核对：CACHE 面板 L2 块显示 "not enabled" 提示，evict 行标签为 "L1 evict"，不再有永远为 0 的 "L2→L1 load" 行。

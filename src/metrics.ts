@@ -550,6 +550,8 @@ export interface SlaSnapshot {
   l2Usage: number
   l2UsedTokens: number
   l2TotalTokens: number
+  hasL2Metrics: boolean
+  hasLoadBack: boolean
   evictedTokensTotal: number
   loadBackTokensTotal: number
   evictedTokenRate: number
@@ -707,6 +709,8 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, en
   const l2UsedTokens = sumOverDp(store, "sglang:hicache_host_used_tokens")
   const l2TotalTokens = sumOverDp(store, "sglang:hicache_host_total_tokens")
   const l2Usage = l2TotalTokens > 0 ? l2UsedTokens / l2TotalTokens : 0
+  const hasL2Metrics = store.lines("sglang:hicache_host_used_tokens").length > 0
+  const hasLoadBack = store.lines("sglang:load_back_tokens_total").length > 0
   const evictedTokensTotal = store.counterValue("sglang:evicted_tokens_total")
   const loadBackTokensTotal = store.counterValue("sglang:load_back_tokens_total")
   const evictedTokenRate = store.counterRate("sglang:evicted_tokens_total")
@@ -779,6 +783,8 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, en
     l2Usage,
     l2UsedTokens,
     l2TotalTokens,
+    hasL2Metrics,
+    hasLoadBack,
     evictedTokensTotal,
     loadBackTokensTotal,
     evictedTokenRate,
@@ -855,6 +861,8 @@ export function mergePdSnapshots(p: SlaSnapshot, d: SlaSnapshot): SlaSnapshot {
     l2Usage: p.l2Usage || d.l2Usage,
     l2UsedTokens: p.l2UsedTokens + d.l2UsedTokens,
     l2TotalTokens: p.l2TotalTokens + d.l2TotalTokens,
+    hasL2Metrics: p.hasL2Metrics || d.hasL2Metrics,
+    hasLoadBack: p.hasLoadBack || d.hasLoadBack,
     evictedTokensTotal: p.evictedTokensTotal + d.evictedTokensTotal,
     loadBackTokensTotal: p.loadBackTokensTotal + d.loadBackTokensTotal,
     evictedTokenRate: p.evictedTokenRate + d.evictedTokenRate,

@@ -12,7 +12,7 @@
 - **E2E latency** — 端到端请求延迟 p50 / p90 / p99，来自 `sglang:e2e_request_latency_seconds`。
 - **Queue wait** — 排队等待时间 p50 / p90 / p99，来自 `sglang:queue_time_seconds`，桶跨 DP 等级累加。
 - **Throughput** — 输出 tok/s（`Δ sglang:generation_tokens_total`）、输入 tok/s（`Δ sglang:prompt_tokens_total`）、汇总 `sglang:gen_throughput` gauge。
-- **Cache** — L1（GPU radix）命中率 = 跨 DP 平均 `sglang:cache_hit_rate`（PD 模式取 prefill 端）；L1（GPU KV 池）占用率 = `num_used_tokens / max_total_num_tokens`（PD 模式两端求和后重算）；L2（host）占用率 = `hicache_host_used_tokens / hicache_host_total_tokens`；引擎自报 `sglang:token_usage` gauge 作为交叉校验（PD 模式取 decode 端）。**L1↔L2 迁移**：`Δ sglang:evicted_tokens_total`（L1→L2）/ `Δ sglang:load_back_tokens_total`（L2→L1）算出 tok/s 速率，并展示累计迁移量。
+- **Cache** — L1（GPU radix）命中率 = 跨 DP 平均 `sglang:cache_hit_rate`（PD 模式取 prefill 端）；L1（GPU KV 池）占用率 = `num_used_tokens / max_total_num_tokens`（PD 模式两端求和后重算）；L2（host）占用率 = `hicache_host_used_tokens / hicache_host_total_tokens`（**未启用 `--enable-hierarchical-cache` 时自动隐藏，显示提示**）；引擎自报 `sglang:token_usage` gauge 作为交叉校验（PD 模式取 decode 端）。**L1 radix evict / L2→L1 load**：`Δ sglang:evicted_tokens_total` / `Δ sglang:load_back_tokens_total` 算出 tok/s 速率（启用 L2 时标签为"L1→L2 evict"迁移语义；未启用时为"L1 evict"自驱逐语义；`load_back_tokens_total` 未暴露时隐藏该行）。
 - **Speculative (EAGLE)** — 跨 DP 的接受率与接受长度（PD 模式取 decode 端）。
 - **Per-Degree (DP0–DP3)** — 按 `dp_rank` 拆分的 running / queued / gen 吞吐 / L1 命中 / KV 使用率表（统一模式）。
 - **PD 模式专属面板** —

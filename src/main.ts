@@ -70,9 +70,10 @@ Metrics shown:
   Cache      L1 hit  = sglang:cache_hit_rate (avg across DP) [prefill-side in PD]
              L1 used = num_used_tokens / max_total_num_tokens (sum across DP)
                        [PD: prefill+decode summed, ratio recomputed]
-             L2 = hicache_host occupancy (used / total) [prefill-side in PD]
-             L1<->L2 migration = evicted_tokens_total / load_back_tokens_total
-                (counter rate tok/s + cumulative totals)
+             L2 = hicache_host occupancy (used / total) [hidden if not enabled]
+             L1 evict = evicted_tokens_total (radix eviction; labeled
+                        "L1->L2 evict" when hierarchical cache enabled)
+             L2->L1 load = load_back_tokens_total [hidden if not exposed]
              KV = sglang:token_usage (engine gauge, decode-side in PD)
   Speculative EAGLE accept rate / accept length (decode-side in PD)
   PD Queues  prefill_bootstrap/inflight, decode_prealloc/transfer, paused/retracted
