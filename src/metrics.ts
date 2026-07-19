@@ -507,6 +507,9 @@ export interface SlaSnapshot {
   l1HitRateGauge: number
   l1PrefillCacheTokens: number
   l1PrefillComputeTokens: number
+  l1UsedTokens: number
+  l1TotalTokens: number
+  l1Usage: number
   l2Usage: number
   l2UsedTokens: number
   l2TotalTokens: number
@@ -661,6 +664,9 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, en
   )
   const l1Total = l1PrefillCacheTokens + l1PrefillComputeTokens
   const l1HitRate = l1Total > 0 ? l1PrefillCacheTokens / l1Total : l1HitRateGauge
+  const l1UsedTokens = sumOverDp(store, "sglang:num_used_tokens")
+  const l1TotalTokens = sumOverDp(store, "sglang:max_total_num_tokens")
+  const l1Usage = l1TotalTokens > 0 ? l1UsedTokens / l1TotalTokens : 0
   const l2UsedTokens = sumOverDp(store, "sglang:hicache_host_used_tokens")
   const l2TotalTokens = sumOverDp(store, "sglang:hicache_host_total_tokens")
   const l2Usage = l2TotalTokens > 0 ? l2UsedTokens / l2TotalTokens : 0
@@ -725,6 +731,9 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, en
     l1HitRateGauge,
     l1PrefillCacheTokens,
     l1PrefillComputeTokens,
+    l1UsedTokens,
+    l1TotalTokens,
+    l1Usage,
     l2Usage,
     l2UsedTokens,
     l2TotalTokens,
@@ -795,6 +804,12 @@ export function mergePdSnapshots(p: SlaSnapshot, d: SlaSnapshot): SlaSnapshot {
     l1HitRateGauge: p.l1HitRateGauge || d.l1HitRateGauge,
     l1PrefillCacheTokens: p.l1PrefillCacheTokens + d.l1PrefillCacheTokens,
     l1PrefillComputeTokens: p.l1PrefillComputeTokens + d.l1PrefillComputeTokens,
+    l1UsedTokens: p.l1UsedTokens + d.l1UsedTokens,
+    l1TotalTokens: p.l1TotalTokens + d.l1TotalTokens,
+    l1Usage:
+      p.l1TotalTokens + d.l1TotalTokens > 0
+        ? (p.l1UsedTokens + d.l1UsedTokens) / (p.l1TotalTokens + d.l1TotalTokens)
+        : 0,
     l2Usage: p.l2Usage || d.l2Usage,
     l2UsedTokens: p.l2UsedTokens + d.l2UsedTokens,
     l2TotalTokens: p.l2TotalTokens + d.l2TotalTokens,

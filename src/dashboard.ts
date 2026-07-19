@@ -381,6 +381,7 @@ ${bold("Cached host")}   ${fg("#cbd5e1")(fmtNum(s.cachedHostTokens) + " tok")}
 
   private renderCache(s: SlaSnapshot): StyledTextLike {
     const l1Color = s.l1HitRate >= 0.5 ? green : s.l1HitRate >= 0.2 ? yellow : red
+    const l1OccColor = s.l1Usage >= 0.9 ? red : s.l1Usage >= 0.7 ? yellow : green
     const l2Color = s.l2Usage >= 0.9 ? red : s.l2Usage >= 0.7 ? yellow : green
     const kvColor = s.kvUsage >= 0.9 ? red : s.kvUsage >= 0.7 ? yellow : green
     const evictColor = s.evictedTokenRate >= 1000 ? red : s.evictedTokenRate >= 100 ? yellow : fg("#94a3b8")
@@ -391,6 +392,8 @@ ${fg("#64748b")("  cache/cache+compute")}
 ${fg("#64748b")("  prefill_cache ")} ${fg("#94a3b8")(fmtNum(s.l1PrefillCacheTokens))}
 ${fg("#64748b")("  prefill_compute")} ${fg("#94a3b8")(fmtNum(s.l1PrefillComputeTokens))}
 ${fg("#64748b")("  gauge ")} ${fg("#475569")(fmtPct(s.l1HitRateGauge))}
+${bold("L1 (GPU) used")} ${l1OccColor(bold(fmtPct(s.l1Usage)))}
+${fg("#64748b")("L1 tokens")} ${fg("#94a3b8")(fmtNum(s.l1UsedTokens) + " / " + fmtNum(s.l1TotalTokens))}
 ${bold("L2 (host) used")} ${l2Color(bold(fmtPct(s.l2Usage)))}
 ${fg("#64748b")("L2 tokens")} ${fg("#94a3b8")(fmtNum(s.l2UsedTokens) + " / " + fmtNum(s.l2TotalTokens))}
 ${fg("#64748b")("────")}
@@ -398,6 +401,8 @@ ${bold("L1→L2 evict")} ${evictColor(fmtTokensPerSec(s.evictedTokenRate))} ${fg
 ${bold("L2→L1 load ")} ${loadColor(fmtTokensPerSec(s.loadBackTokenRate))} ${fg("#64748b")("(" + fmtNum(s.loadBackTokensTotal) + " tok)")}
 ${fg("#64748b")("────")}
 ${bold("KV usage")}      ${kvColor(bold(fmtPct(s.kvUsage)))}
+${fg("#64748b")("(engine token_usage gauge;")}
+${fg("#64748b")("decode-side in PD mode)")}
 `
   }
 

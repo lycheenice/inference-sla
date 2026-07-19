@@ -67,11 +67,13 @@ Metrics shown:
   E2E        end-to-end request latency p50/p90/p99
   Queue wait queueing time p50/p90/p99 (sglang:queue_time_seconds, summed across DP)
   Throughput output tok/s, input tok/s, gen throughput gauge
-  Cache      L1 = sglang:cache_hit_rate (avg across DP) [prefill-side in PD]
+  Cache      L1 hit  = sglang:cache_hit_rate (avg across DP) [prefill-side in PD]
+             L1 used = num_used_tokens / max_total_num_tokens (sum across DP)
+                       [PD: prefill+decode summed, ratio recomputed]
              L2 = hicache_host occupancy (used / total) [prefill-side in PD]
              L1<->L2 migration = evicted_tokens_total / load_back_tokens_total
                 (counter rate tok/s + cumulative totals)
-             KV = sglang:token_usage (avg across DP) [decode-side in PD]
+             KV = sglang:token_usage (engine gauge, decode-side in PD)
   Speculative EAGLE accept rate / accept length (decode-side in PD)
   PD Queues  prefill_bootstrap/inflight, decode_prealloc/transfer, paused/retracted
   KV Transfer latency/total/speed/bootstrap/alloc (prefill-side sender)

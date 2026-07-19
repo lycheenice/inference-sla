@@ -43,6 +43,10 @@ sglang:hicache_host_used_tokens{dp_rank="0",engine_type="unified",model_name="gl
 sglang:hicache_host_total_tokens{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 3908736.0
 sglang:hicache_host_used_tokens{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 2000000.0
 sglang:hicache_host_total_tokens{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 3908736.0
+sglang:num_used_tokens{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 10000.0
+sglang:max_total_num_tokens{dp_rank="0",engine_type="unified",model_name="glm",tp_rank="0"} 100000.0
+sglang:num_used_tokens{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 20000.0
+sglang:max_total_num_tokens{dp_rank="1",engine_type="unified",model_name="glm",tp_rank="2"} 100000.0
 sglang:cached_tokens_total{cache_source="device",engine_type="unified",model_name="glm"} 5.11430304e+09
 sglang:cached_tokens_total{cache_source="host",engine_type="unified",model_name="glm"} 1.729396096e+09
 sglang:evicted_tokens_total{engine_type="unified",model_name="glm"} 12345.0
@@ -195,6 +199,15 @@ describe("buildSnapshot", () => {
     expect(snap.l2Usage).toBeLessThan(0.7)
   })
 
+  test("computes L1 (GPU) capacity & usage from num_used/max_total", () => {
+    const store = new MetricsStore()
+    store.ingest(SAMPLE)
+    const snap = buildSnapshot(store, null)
+    expect(snap.l1UsedTokens).toBe(30000)
+    expect(snap.l1TotalTokens).toBe(200000)
+    expect(snap.l1Usage).toBeCloseTo(0.15, 5)
+  })
+
   test("computes L1<->L2 migration totals; rate 0 on first sample, >0 after delta", async () => {
     const store = new MetricsStore()
     store.ingest(SAMPLE)
@@ -340,6 +353,10 @@ sglang:queue_time_seconds_bucket{engine_type="prefill",le="+Inf",model_name="glm
 sglang:cache_hit_rate{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.76
 # TYPE sglang:token_usage gauge
 sglang:token_usage{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# TYPE sglang:num_used_tokens gauge
+sglang:num_used_tokens{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 50000.0
+# TYPE sglang:max_total_num_tokens gauge
+sglang:max_total_num_tokens{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 441792.0
 # TYPE sglang:realtime_tokens_total counter
 sglang:realtime_tokens_total{engine_type="prefill",mode="prefill_cache",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 470.0
 sglang:realtime_tokens_total{engine_type="prefill",mode="prefill_compute",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 146.0
@@ -390,6 +407,8 @@ sglang:num_aborted_requests_total{engine_type="decode",model_name="glm"} 0.0
 sglang:num_decode_transfer_queue_reqs{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 3.0
 # TYPE sglang:kv_used_tokens gauge
 sglang:kv_used_tokens{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 145856.0
+# TYPE sglang:num_used_tokens gauge
+sglang:num_used_tokens{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 160000.0
 # TYPE sglang:max_total_num_tokens gauge
 sglang:max_total_num_tokens{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 441792.0
 # TYPE sglang:evicted_tokens_total counter
@@ -461,7 +480,7 @@ describe("PD-disaggregated mode", () => {
     expect(m.pdQueues.prefillBootstrap).toBe(2)
     expect(m.pdQueues.decodeTransfer).toBe(3)
     expect(m.perStage.length).toBe(2)
-    expect(m.kvPool.maxTotalTokens).toBe(441792)
+    expect(m.kvPool.maxTotalTokens).toBe(883584)
     expect(m.kvPool.usedTokens).toBe(145856)
     expect(m.endpoint).toContain("P http://p/metrics")
     expect(m.endpoint).toContain("D http://d/metrics")
@@ -477,5 +496,18 @@ describe("PD-disaggregated mode", () => {
     const m = mergePdSnapshots(p, d)
     expect(m.evictedTokensTotal).toBe(1300)
     expect(m.loadBackTokensTotal).toBe(2400)
+  })
+
+  test("mergePdSnapshots sums L1 capacity/usage and recomputes ratio", () => {
+    const pStore = new MetricsStore()
+    pStore.ingest(PREFILL_FIXTURE)
+    const dStore = new MetricsStore()
+    dStore.ingest(DECODE_FIXTURE)
+    const p = buildSnapshot(pStore, null, "http://p/metrics")
+    const d = buildSnapshot(dStore, null, "http://d/metrics")
+    const m = mergePdSnapshots(p, d)
+    expect(m.l1UsedTokens).toBe(50000 + 160000)
+    expect(m.l1TotalTokens).toBe(441792 + 441792)
+    expect(m.l1Usage).toBeCloseTo((50000 + 160000) / (441792 + 441792), 5)
   })
 })
