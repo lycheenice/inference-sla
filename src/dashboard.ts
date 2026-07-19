@@ -16,6 +16,7 @@ import {
 } from "@opentui/core"
 import {
   type SlaSnapshot,
+  fmtMbPerSec,
   fmtMs,
   fmtNum,
   fmtPct,
@@ -474,6 +475,14 @@ ${fg("#64748b")("disjoint KV transfer queues)")}
   private renderKvTransfer(s: SlaSnapshot): StyledTextLike {
     const k = s.kvTransfer
     const chunks: TextChunk[] = []
+    const rateColor = k.rateMbS > 0 ? cyan : fg("#475569")
+    chunks.push(
+      bold("sustained rate "),
+      rateColor(bold(fmtMbPerSec(k.rateMbS))),
+      fg("#64748b")("  (Δ total_mb_sum/Δt)"),
+      fg("#334155")("\n"),
+      fg("#334155")("────────────────────────────\n"),
+    )
     chunks.push(bold(fg("#94a3b8")("              p50/p90/p99\n")))
     const pushRow = (label: string, h: { p50: number; p90: number; p99: number; avg: number; count: number } | null, unit: string, last: boolean) => {
       if (!h || h.count === 0) {

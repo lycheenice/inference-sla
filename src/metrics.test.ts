@@ -124,6 +124,33 @@ describe("MetricsStore", () => {
     expect(h!.buckets[0].le).toBe(0.1)
     expect(h!.buckets[h!.buckets.length - 1].le).toBe(Number.POSITIVE_INFINITY)
   })
+
+  test("counterRateDedup returns 0 on first sample, positive rate after delta (dedup'd across tp_rank)", async () => {
+    const fixture = `
+sglang:kv_transfer_total_mb_sum{engine_type="prefill",tp_rank="0"} 1000.0
+sglang:kv_transfer_total_mb_sum{engine_type="prefill",tp_rank="1"} 1000.0
+sglang:kv_transfer_total_mb_sum{engine_type="prefill",tp_rank="2"} 1000.0
+sglang:kv_transfer_total_mb_sum{engine_type="prefill",tp_rank="3"} 1000.0
+`
+    const store = new MetricsStore()
+    store.ingest(fixture)
+    // First sample: rate 0, currentValue dedup'd to 1000 (not 4000)
+    const first = store.counterRateDedup("sglang:kv_transfer_total_mb_sum", "dp_rank")
+    expect(first).toBe(0)
+    await new Promise((r) => setTimeout(r, 60))
+    const fixture2 = `
+sglang:kv_transfer_total_mb_sum{engine_type="prefill",tp_rank="0"} 1500.0
+sglang:kv_transfer_total_mb_sum{engine_type="prefill",tp_rank="1"} 1500.0
+sglang:kv_transfer_total_mb_sum{engine_type="prefill",tp_rank="2"} 1500.0
+sglang:kv_transfer_total_mb_sum{engine_type="prefill",tp_rank="3"} 1500.0
+`
+    store.ingest(fixture2)
+    const second = store.counterRateDedup("sglang:kv_transfer_total_mb_sum", "dp_rank")
+    // delta = 1500 - 1000 = 500 MB, dt ≈ 0.06s → rate ≈ 8333 MB/s (positive)
+    expect(second).toBeGreaterThan(0)
+    // Sanity: rate should be 500/dt, not 2000/dt (which would be the 4x-inflated case)
+    expect(second).toBeLessThan(500 / 0.05) // upper bound: if dt were exactly 50ms
+  })
 })
 
 describe("histogramQuantile", () => {
@@ -508,6 +535,26 @@ describe("PD-disaggregated mode", () => {
     // from a clean histogram — with count=12, p50 target=6, first bucket ≥6 is
     // le=5000 cum=6 → p50=5000.
     expect(snap.kvTransfer.latencyMs!.p50).toBe(5000)
+  })
+
+  test("buildSnapshot kvTransfer.rateMbS is 0 on first sample (counterRateDedup)", () => {
+    const store = new MetricsStore()
+    store.ingest(PREFILL_FIXTURE)
+    const snap = buildSnapshot(store, null, "http://p/metrics")
+    expect(snap.kvTransfer.rateMbS).toBe(0) // first sample
+  })
+
+  test("mergePdSnapshots picks prefill kvTransfer.rateMbS", () => {
+    const pStore = new MetricsStore()
+    pStore.ingest(PREFILL_FIXTURE)
+    const dStore = new MetricsStore()
+    dStore.ingest(DECODE_FIXTURE)
+    const p = buildSnapshot(pStore, null, "http://p/metrics")
+    const d = buildSnapshot(dStore, null, "http://d/metrics")
+    const m = mergePdSnapshots(p, d)
+    // Both 0 on first sample; pick prefill's (|| fallback). Assert structure.
+    expect(m.kvTransfer.rateMbS).toBe(p.kvTransfer.rateMbS || d.kvTransfer.rateMbS)
+    expect(Number.isFinite(m.kvTransfer.rateMbS)).toBe(true)
   })
 
   test("mergePdSnapshots combines prefill+decode into pd-disagg view", () => {

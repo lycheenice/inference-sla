@@ -97,7 +97,53 @@ const kvTransfer: KvTransferStats = {
 
 ## Feature 2: PD KV transfer 持续 MB/s 速率
 
-（待 F1 交付后补充本节）
+### 问题
+
+KV TRANSFER 面板当前只显示 5 个 histogram 的 p50/p90/p99 分位数（单次转移的总量/延迟/速率分布）。用户反馈"观察不到流量"——根本原因是面板缺少一个**持续吞吐速率**指标。当流量停止时，分位数表仍显示历史 p50/p90/p99（histogram 不会回退），看起来"有流量"但实际已停；反之启动初期 count=0 时显示"— (no samples)"，看不出是否开始流动。
+
+sglang 未暴露 `kv_transfer_total_mb_total` 这样的持续 counter。但 `sglang:kv_transfer_total_mb_sum`（histogram 的 `_sum`）是累计转移量（MB），随每次 KV 转移单调递增。对它做 Δ/Δt 即得持续 MB/s。
+
+生产数据：prefill 端 4 个 tp_rank 各报 `kv_transfer_total_mb_sum ≈ 2.226e6 MB`（count=981，约 2269 MB/次转移），完全相同——是 TP rank 间的复制上报。
+
+### 现有帮手不足
+
+`MetricsStore.counterRate(name, labelFilter)` 会对所有匹配 `_sum` 行求和（4× 通胀），且 `lastCounters` 的 key 含 `sample.labels`（首个匹配样本的完整标签，含 `tp_rank="0"`），若下次迭代首样本换 tp_rank 则 key 不匹配，速率断裂。
+
+### 设计
+
+新增 `MetricsStore.counterRateDedup(name, groupBy, labelFilter?)`：
+
+1. 遍历 `lines(name)`，按 `groupBy` 标签分组（与 `sumOverDp` 同语义）
+2. 组内取首个样本（去重 TP/EP 重复），跨组求和 → `currentValue`
+3. `lastCounters` 的 key 用 `name` + groupBy 拓展（不含样本 labels），稳定不变
+4. `rate = (currentValue - prev.value) / dt`，首次为 0
+
+这本质是 `sumOverDp` 的 current value + rate 跟踪。
+
+### 改动点
+
+1. `src/metrics.ts` `MetricsStore` 新增 `counterRateDedup(name, groupBy, labelFilter?)` 方法
+2. `SlaSnapshot` 新增 `kvTransferRateMbS: number`（持续 MB/s）
+3. `buildSnapshot`：`const kvTransferRateMbS = store.counterRateDedup("sglang:kv_transfer_total_mb_sum", "dp_rank")`
+4. `KvTransferStats` 新增 `rateMbS: number`（放在 `KvTransferStats` 里，与 histogram 同构）
+5. `mergePdSnapshots`：取有样本端的 `rateMbS`（通常 prefill）—— 实际上两端都算（PD 合并前各自 buildSnapshot），取 `p.rateMbS || d.rateMbS`
+6. `dashboard.ts` `renderKvTransfer`：表头下方新增一行 `rate (MB/s)  <fmtNum(rate)> n=<count>`（或放顶部作为醒目主指标），用 `fmtTokensPerSec` 的类比格式化器
+
+### 格式化
+
+新增 `fmtMbPerSec(n)`：`<n> MB/s`，≥1000 显示 `X.XX GB/s`。或直接复用 `fmtNum` + " MB/s"。
+
+### 测试设计
+
+1. `counterRateDedup` 首次采样返回 0
+2. 第二次采样（_sum 增量已知、dt 已知）返回正速率
+3. 4× tp_rank 重复样本下，`currentValue` = 单值（非 4×）
+4. `buildSnapshot` 产出 `snap.kvTransfer.rateMbS`，首采为 0，二次 >0
+5. `mergePdSnapshots` 合并后 `rateMbS` 取 prefill 端
+
+### 验证
+
+`bun run typecheck` + `bun run lint` + `bun test`。生产端点核对：面板顶部应显示持续 MB/s，与 `kv_transfer_total_mb_sum` 的 Δ/Δt 吻合。
 
 ---
 

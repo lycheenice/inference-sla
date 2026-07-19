@@ -182,6 +182,36 @@ export class MetricsStore {
     return rate
   }
 
+  counterRateDedup(
+    name: string,
+    groupBy: string,
+    labelFilter?: (l: LabelSet) => boolean,
+  ): number {
+    const seen = new Set<string>()
+    let currentValue = 0
+    let firstLabels: LabelSet | undefined
+    for (const l of this.lines(name)) {
+      if (labelFilter && !labelFilter(l.labels)) continue
+      const g = l.labels[groupBy] ?? "*"
+      if (seen.has(g)) continue
+      seen.add(g)
+      currentValue += l.value
+      if (!firstLabels) firstLabels = l.labels
+    }
+    if (!firstLabels) return 0
+    const now = Date.now()
+    const key = name + "|dedup:" + groupBy
+    const prev = this.lastCounters.get(key)
+    let rate = 0
+    if (prev && now > prev.ts) {
+      const dt = (now - prev.ts) / 1000
+      const delta = currentValue - prev.value
+      if (delta >= 0 && dt > 0) rate = delta / dt
+    }
+    this.lastCounters.set(key, { name, labels: firstLabels, value: currentValue, ts: now })
+    return rate
+  }
+
   histogram(name: string, labelFilter?: (l: LabelSet) => boolean): Histogram | null {
     let count = 0
     let sum = 0
@@ -376,6 +406,12 @@ export function fmtTokensPerSec(n: number): string {
   return n.toFixed(0) + " tok/s"
 }
 
+export function fmtMbPerSec(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 MB/s"
+  if (n >= 1024) return (n / 1024).toFixed(2) + " GB/s"
+  return n.toFixed(0) + " MB/s"
+}
+
 export function sumOverDp(store: MetricsStore, name: string): number {
   const seen = new Set<string>()
   let total = 0
@@ -461,6 +497,7 @@ export interface KvTransferStats {
   speedGbS: HistStats | null
   bootstrapMs: HistStats | null
   allocMs: HistStats | null
+  rateMbS: number
 }
 
 export interface PdQueues {
@@ -681,12 +718,17 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, en
   const specAcceptLength = avgOverDp(store, "sglang:spec_accept_length")
 
   const perStage = perStageLatencies(store)
+  const kvTransferRateMbS = store.counterRateDedup(
+    "sglang:kv_transfer_total_mb_sum",
+    "dp_rank",
+  )
   const kvTransfer: KvTransferStats = {
     latencyMs: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_latency_ms", undefined, "dp_rank")),
     totalMb: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_total_mb", undefined, "dp_rank")),
     speedGbS: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_speed_gb_s", undefined, "dp_rank")),
     bootstrapMs: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_bootstrap_ms", undefined, "dp_rank")),
     allocMs: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_alloc_ms", undefined, "dp_rank")),
+    rateMbS: kvTransferRateMbS,
   }
   const pdQueues: PdQueues = {
     prefillBootstrap: sumOverDp(store, "sglang:num_prefill_bootstrap_queue_reqs"),
@@ -829,6 +871,7 @@ export function mergePdSnapshots(p: SlaSnapshot, d: SlaSnapshot): SlaSnapshot {
       speedGbS: kvAny(p.kvTransfer.speedGbS) ?? kvAny(d.kvTransfer.speedGbS),
       bootstrapMs: kvAny(p.kvTransfer.bootstrapMs) ?? kvAny(d.kvTransfer.bootstrapMs),
       allocMs: kvAny(p.kvTransfer.allocMs) ?? kvAny(d.kvTransfer.allocMs),
+      rateMbS: p.kvTransfer.rateMbS || d.kvTransfer.rateMbS,
     },
     pdQueues: {
       prefillBootstrap: p.pdQueues.prefillBootstrap,
