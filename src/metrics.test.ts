@@ -332,6 +332,21 @@ sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="5000.0",model_nam
 sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 12.0
 sglang:kv_transfer_latency_ms_count{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 12.0
 sglang:kv_transfer_latency_ms_sum{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 107754.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="1000.0",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 0.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="5000.0",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 6.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 12.0
+sglang:kv_transfer_latency_ms_count{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 12.0
+sglang:kv_transfer_latency_ms_sum{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 107754.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="1000.0",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="2"} 0.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="5000.0",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="2"} 6.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="2"} 12.0
+sglang:kv_transfer_latency_ms_count{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="2"} 12.0
+sglang:kv_transfer_latency_ms_sum{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="2"} 107754.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="1000.0",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="3"} 0.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="5000.0",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="3"} 6.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="3"} 12.0
+sglang:kv_transfer_latency_ms_count{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="3"} 12.0
+sglang:kv_transfer_latency_ms_sum{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="3"} 107754.0
 # TYPE sglang:e2e_request_latency_seconds histogram
 sglang:e2e_request_latency_seconds_count{engine_type="prefill",model_name="glm"} 13.0
 sglang:e2e_request_latency_seconds_sum{engine_type="prefill",model_name="glm"} 510.0
@@ -456,6 +471,43 @@ describe("PD-disaggregated mode", () => {
     expect(h!.count).toBe(67)
     const cum = h!.buckets.find((b) => b.le === 0.001)!.cum
     expect(cum).toBe(64)
+  })
+
+  test("kv_transfer_latency_ms histogram buckets duplicated across 4 tp_ranks (inflation bug surface)", () => {
+    // Exposes the bug: histogramByName pushes ALL tp_rank bucket samples (no dedup).
+    // _count is overwrite (not inflated), but _bucket array has 4x duplicate entries.
+    const store = new MetricsStore()
+    store.ingest(PREFILL_FIXTURE)
+    const inflated = store.histogramByName("sglang:kv_transfer_latency_ms")
+    expect(inflated).not.toBeNull()
+    expect(inflated!.count).toBe(12) // _count overwrites — not inflated
+    expect(inflated!.buckets.length).toBe(12) // 3 buckets × 4 tp_ranks — BUG: duplicates
+  })
+
+  test("kv_transfer latency dedup'd via histSumBucketsAcrossDp collapses buckets to 1x", () => {
+    const store = new MetricsStore()
+    store.ingest(PREFILL_FIXTURE)
+    const h = store.histSumBucketsAcrossDp("sglang:kv_transfer_latency_ms", undefined, "dp_rank")
+    expect(h).not.toBeNull()
+    expect(h!.count).toBe(12) // dedup'd, not inflated
+    expect(h!.buckets.length).toBe(3) // 1x, not 4x
+    expect(h!.sum).toBeCloseTo(107754, 5)
+    const cum5k = h!.buckets.find((b) => b.le === 5000.0)!.cum
+    expect(cum5k).toBe(6) // first tp_rank's value
+    const cumInf = h!.buckets.find((b) => b.le === Number.POSITIVE_INFINITY)!.cum
+    expect(cumInf).toBe(12)
+  })
+
+  test("buildSnapshot kvTransfer uses dedup'd histogram (buckets=3, not 12)", () => {
+    const store = new MetricsStore()
+    store.ingest(PREFILL_FIXTURE)
+    const snap = buildSnapshot(store, null, "http://p/metrics")
+    expect(snap.kvTransfer.latencyMs).not.toBeNull()
+    expect(snap.kvTransfer.latencyMs!.count).toBe(12)
+    // After fix: buckets dedup'd to 3 (not 12). We assert via p50 being computed
+    // from a clean histogram — with count=12, p50 target=6, first bucket ≥6 is
+    // le=5000 cum=6 → p50=5000.
+    expect(snap.kvTransfer.latencyMs!.p50).toBe(5000)
   })
 
   test("mergePdSnapshots combines prefill+decode into pd-disagg view", () => {

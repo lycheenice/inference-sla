@@ -682,11 +682,11 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, en
 
   const perStage = perStageLatencies(store)
   const kvTransfer: KvTransferStats = {
-    latencyMs: histToStats(store.histogramByName("sglang:kv_transfer_latency_ms")),
-    totalMb: histToStats(store.histogramByName("sglang:kv_transfer_total_mb")),
-    speedGbS: histToStats(store.histogramByName("sglang:kv_transfer_speed_gb_s")),
-    bootstrapMs: histToStats(store.histogramByName("sglang:kv_transfer_bootstrap_ms")),
-    allocMs: histToStats(store.histogramByName("sglang:kv_transfer_alloc_ms")),
+    latencyMs: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_latency_ms", undefined, "dp_rank")),
+    totalMb: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_total_mb", undefined, "dp_rank")),
+    speedGbS: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_speed_gb_s", undefined, "dp_rank")),
+    bootstrapMs: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_bootstrap_ms", undefined, "dp_rank")),
+    allocMs: histToStats(store.histSumBucketsAcrossDp("sglang:kv_transfer_alloc_ms", undefined, "dp_rank")),
   }
   const pdQueues: PdQueues = {
     prefillBootstrap: sumOverDp(store, "sglang:num_prefill_bootstrap_queue_reqs"),
