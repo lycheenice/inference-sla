@@ -243,7 +243,7 @@ export class MetricsStore {
   }
 
   histSumBucketsAcrossDp(metricBase: string, labelFilter?: (l: LabelSet) => boolean, groupBy?: string): Histogram | null {
-    const bucketMap = new Map<number, number>()
+    const groupBuckets = new Map<string, Map<number, number>>()
     let count = 0
     let sum = 0
     let hasAny = false
@@ -253,9 +253,18 @@ export class MetricsStore {
       if (le === undefined) continue
       const leNum = le === "+Inf" ? INF : Number(le)
       if (Number.isNaN(leNum)) continue
-      const cur = bucketMap.get(leNum) ?? 0
-      bucketMap.set(leNum, cur + l.value)
+      const g = groupBy ? (l.labels[groupBy] ?? "*") : "*"
+      let m = groupBuckets.get(g)
+      if (!m) {
+        m = new Map<number, number>()
+        groupBuckets.set(g, m)
+      }
+      if (!m.has(leNum)) m.set(leNum, l.value)
       hasAny = true
+    }
+    const bucketMap = new Map<number, number>()
+    for (const m of groupBuckets.values()) {
+      for (const [le, cum] of m) bucketMap.set(le, (bucketMap.get(le) ?? 0) + cum)
     }
     const seenGroups = new Set<string>()
     for (const l of this.lines(metricBase + "_count")) {
@@ -306,6 +315,36 @@ export function histogramQuantile(hist: Histogram, q: number): number {
 
 export function avgOfHist(hist: Histogram): number {
   return hist.count > 0 ? hist.sum / hist.count : 0
+}
+
+const EMPTY_HIST_STATS: HistStats = { p50: 0, p90: 0, p99: 0, avg: 0, count: 0 }
+
+export function histToStats(hist: Histogram | null): HistStats {
+  if (!hist || hist.count <= 0) return { ...EMPTY_HIST_STATS }
+  return {
+    p50: histogramQuantile(hist, 0.5),
+    p90: histogramQuantile(hist, 0.9),
+    p99: histogramQuantile(hist, 0.99),
+    avg: avgOfHist(hist),
+    count: hist.count,
+  }
+}
+
+export function sglangHistStats(
+  store: MetricsStore,
+  base: string,
+  labelFilter?: (l: LabelSet) => boolean,
+): HistStats {
+  return histToStats(store.histogramByName(base, labelFilter))
+}
+
+export function sglangHistStatsAggregate(
+  store: MetricsStore,
+  base: string,
+  groupBy?: string,
+  labelFilter?: (l: LabelSet) => boolean,
+): HistStats {
+  return histToStats(store.histSumBucketsAcrossDp(base, labelFilter, groupBy))
 }
 
 export function fmtNum(n: number, digits = 0): string {
@@ -402,18 +441,63 @@ export function perDpL1HitRate(
   return out
 }
 
+export type EngineRole = "unified" | "prefill" | "decode" | "pd-disagg" | "unknown"
+
+export interface HistStats {
+  p50: number
+  p90: number
+  p99: number
+  avg: number
+  count: number
+}
+
+export interface StageLatency extends HistStats {
+  stage: string
+}
+
+export interface KvTransferStats {
+  latencyMs: HistStats | null
+  totalMb: HistStats | null
+  speedGbS: HistStats | null
+  bootstrapMs: HistStats | null
+  allocMs: HistStats | null
+}
+
+export interface PdQueues {
+  prefillBootstrap: number
+  prefillInflight: number
+  decodePrealloc: number
+  decodeTransfer: number
+  paused: number
+  retracted: number
+}
+
+export interface KvPoolStats {
+  usedTokens: number
+  availableTokens: number
+  evictableTokens: number
+  maxTotalTokens: number
+  numUsedTokens: number
+}
+
 export interface SlaSnapshot {
   ts: number
+  engineRole: EngineRole
+  modelName: string
+  endpoint: string
   running: number
   queued: number
   concurrent: number
   httpActive: number
   maxRunning: number
   maxQueued: number
-  ttft: { p50: number; p90: number; p99: number; avg: number; count: number }
-  tpot: { p50: number; p90: number; p99: number; avg: number; count: number }
-  e2e: { p50: number; p90: number; p99: number; avg: number; count: number }
-  queueTime: { p50: number; p90: number; p99: number; avg: number; count: number }
+  ttft: HistStats
+  tpot: HistStats
+  e2e: HistStats
+  queueTime: HistStats
+  hasTtft: boolean
+  hasTpot: boolean
+  hasE2e: boolean
   genThroughput: number
   outputTokenRate: number
   inputTokenRate: number
@@ -431,6 +515,10 @@ export interface SlaSnapshot {
   cachedHostTokens: number
   specAcceptRate: number
   specAcceptLength: number
+  perStage: StageLatency[]
+  kvTransfer: KvTransferStats
+  pdQueues: PdQueues
+  kvPool: KvPoolStats
   perDp: {
     running: { dp: string; value: number }[]
     queued: { dp: string; value: number }[]
@@ -442,11 +530,100 @@ export interface SlaSnapshot {
   fetchError: string | null
 }
 
-export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): SlaSnapshot {
+const HTTP_ENDPOINT_PRIORITY = ["/v1/chat/completions", "/v1/completions", "/generate"]
+
+function detectEngineRole(store: MetricsStore): EngineRole {
+  const seen = new Set<string>()
+  for (const name of ["sglang:num_running_reqs", "sglang:gen_throughput", "sglang:token_usage"]) {
+    for (const l of store.lines(name)) {
+      if (l.labels["engine_type"]) seen.add(l.labels["engine_type"])
+    }
+  }
+  if (seen.size === 0) return "unknown"
+  if (seen.has("prefill") && seen.has("decode")) return "unknown"
+  if (seen.has("prefill")) return "prefill"
+  if (seen.has("decode")) return "decode"
+  return "unified"
+}
+
+function detectModelName(store: MetricsStore): string {
+  for (const l of store.lines("sglang:num_running_reqs")) {
+    if (l.labels["model_name"]) return l.labels["model_name"]
+  }
+  for (const l of store.lines("sglang:num_requests_total")) {
+    if (l.labels["model_name"]) return l.labels["model_name"]
+  }
+  return ""
+}
+
+function httpActiveOf(store: MetricsStore): number {
+  for (const ep of HTTP_ENDPOINT_PRIORITY) {
+    const v = store.anyGauge("sglang:http_requests_active", (l) => l["endpoint"] === ep)
+    if (v > 0) return v
+  }
+  for (const ep of HTTP_ENDPOINT_PRIORITY) {
+    const v = store.anyGauge("sglang:http_requests_active", (l) => l["endpoint"] === ep)
+    if (store.lines("sglang:http_requests_active").some((l) => l.labels["endpoint"] === ep)) return v
+  }
+  return 0
+}
+
+function safeNum(v: number): number {
+  return Number.isFinite(v) ? v : 0
+}
+
+export function perStageLatencies(store: MetricsStore, labelFilter?: (l: LabelSet) => boolean): StageLatency[] {
+  const stages = new Map<string, { count: number; sum: number; buckets: Map<number, number> }>()
+  const stageOrder: string[] = []
+  for (const l of store.lines("sglang:per_stage_req_latency_seconds_bucket")) {
+    if (labelFilter && !labelFilter(l.labels)) continue
+    const stage = l.labels["stage"]
+    if (!stage) continue
+    const le = l.labels["le"]
+    if (le === undefined) continue
+    const leNum = le === "+Inf" ? INF : Number(le)
+    if (Number.isNaN(leNum)) continue
+    let s = stages.get(stage)
+    if (!s) {
+      s = { count: 0, sum: 0, buckets: new Map<number, number>() }
+      stages.set(stage, s)
+      stageOrder.push(stage)
+    }
+    if (!s.buckets.has(leNum)) s.buckets.set(leNum, l.value)
+  }
+  const out: StageLatency[] = []
+  for (const stage of stageOrder) {
+    const s = stages.get(stage)!
+    const countLines = store
+      .lines("sglang:per_stage_req_latency_seconds_count")
+      .filter((l) => l.labels["stage"] === stage && (!labelFilter || labelFilter(l.labels)))
+    const sumLines = store
+      .lines("sglang:per_stage_req_latency_seconds_sum")
+      .filter((l) => l.labels["stage"] === stage && (!labelFilter || labelFilter(l.labels)))
+    if (countLines.length > 0) s.count = countLines[0].value
+    if (sumLines.length > 0) s.sum = sumLines[0].value
+    const buckets = Array.from(s.buckets.entries()).map(([le, cum]) => ({ le, cum }))
+    buckets.sort((a, b) => a.le - b.le)
+    const hist: Histogram = { count: s.count, sum: s.sum, buckets }
+    out.push({
+      stage,
+      p50: histogramQuantile(hist, 0.5),
+      p90: histogramQuantile(hist, 0.9),
+      p99: histogramQuantile(hist, 0.99),
+      avg: avgOfHist(hist),
+      count: s.count,
+    })
+  }
+  return out
+}
+
+export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null, endpoint = ""): SlaSnapshot {
   const noDp = (l: LabelSet) => l["dp_rank"] === undefined
+  const engineRole = detectEngineRole(store)
+  const modelName = detectModelName(store)
   const running = sumOverDp(store, "sglang:num_running_reqs")
   const queued = sumOverDp(store, "sglang:num_queue_reqs")
-  const httpActive = store.anyGauge("sglang:http_requests_active", (l) => l["endpoint"] === "/v1/chat/completions")
+  const httpActive = httpActiveOf(store)
   const maxRunning = 64
   const maxQueued = 512
 
@@ -455,18 +632,13 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): S
   const e2eH = store.histogramByName("sglang:e2e_request_latency_seconds", noDp)
   const queueH = store.histSumBucketsAcrossDp("sglang:queue_time_seconds", undefined, "dp_rank")
 
-  const ttft = ttftH
-    ? { p50: histogramQuantile(ttftH, 0.5), p90: histogramQuantile(ttftH, 0.9), p99: histogramQuantile(ttftH, 0.99), avg: avgOfHist(ttftH), count: ttftH.count }
-    : { p50: 0, p90: 0, p99: 0, avg: 0, count: 0 }
-  const tpot = tpotH
-    ? { p50: histogramQuantile(tpotH, 0.5), p90: histogramQuantile(tpotH, 0.9), p99: histogramQuantile(tpotH, 0.99), avg: avgOfHist(tpotH), count: tpotH.count }
-    : { p50: 0, p90: 0, p99: 0, avg: 0, count: 0 }
-  const e2e = e2eH
-    ? { p50: histogramQuantile(e2eH, 0.5), p90: histogramQuantile(e2eH, 0.9), p99: histogramQuantile(e2eH, 0.99), avg: avgOfHist(e2eH), count: e2eH.count }
-    : { p50: 0, p90: 0, p99: 0, avg: 0, count: 0 }
-  const queueTime = queueH
-    ? { p50: histogramQuantile(queueH, 0.5), p90: histogramQuantile(queueH, 0.9), p99: histogramQuantile(queueH, 0.99), avg: avgOfHist(queueH), count: queueH.count }
-    : { p50: 0, p90: 0, p99: 0, avg: 0, count: 0 }
+  const ttft = histToStats(ttftH)
+  const tpot = histToStats(tpotH)
+  const e2e = histToStats(e2eH)
+  const queueTime = histToStats(queueH)
+  const hasTtft = ttftH != null && ttftH.count > 0
+  const hasTpot = tpotH != null && tpotH.count > 0
+  const hasE2e = e2eH != null && e2eH.count > 0
 
   const genThroughput = sumOverDp(store, "sglang:gen_throughput")
   const outputTokenRate = store.counterRate("sglang:generation_tokens_total")
@@ -488,14 +660,41 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): S
   const l2UsedTokens = sumOverDp(store, "sglang:hicache_host_used_tokens")
   const l2TotalTokens = sumOverDp(store, "sglang:hicache_host_total_tokens")
   const l2Usage = l2TotalTokens > 0 ? l2UsedTokens / l2TotalTokens : 0
-  const kvUsage = avgOverDp(store, "sglang:token_usage")
+  const kvUsage = safeNum(avgOverDp(store, "sglang:token_usage"))
   const cachedDeviceTokens = store.counterValue("sglang:cached_tokens_total", (l) => l["cache_source"] === "device")
   const cachedHostTokens = store.counterValue("sglang:cached_tokens_total", (l) => l["cache_source"] === "host")
   const specAcceptRate = avgOverDp(store, "sglang:spec_accept_rate")
   const specAcceptLength = avgOverDp(store, "sglang:spec_accept_length")
 
+  const perStage = perStageLatencies(store)
+  const kvTransfer: KvTransferStats = {
+    latencyMs: histToStats(store.histogramByName("sglang:kv_transfer_latency_ms")),
+    totalMb: histToStats(store.histogramByName("sglang:kv_transfer_total_mb")),
+    speedGbS: histToStats(store.histogramByName("sglang:kv_transfer_speed_gb_s")),
+    bootstrapMs: histToStats(store.histogramByName("sglang:kv_transfer_bootstrap_ms")),
+    allocMs: histToStats(store.histogramByName("sglang:kv_transfer_alloc_ms")),
+  }
+  const pdQueues: PdQueues = {
+    prefillBootstrap: sumOverDp(store, "sglang:num_prefill_bootstrap_queue_reqs"),
+    prefillInflight: sumOverDp(store, "sglang:num_prefill_inflight_queue_reqs"),
+    decodePrealloc: sumOverDp(store, "sglang:num_decode_prealloc_queue_reqs"),
+    decodeTransfer: sumOverDp(store, "sglang:num_decode_transfer_queue_reqs"),
+    paused: sumOverDp(store, "sglang:num_paused_reqs"),
+    retracted: sumOverDp(store, "sglang:num_retracted_reqs"),
+  }
+  const kvPool: KvPoolStats = {
+    usedTokens: sumOverDp(store, "sglang:kv_used_tokens"),
+    availableTokens: sumOverDp(store, "sglang:kv_available_tokens"),
+    evictableTokens: sumOverDp(store, "sglang:kv_evictable_tokens"),
+    maxTotalTokens: sumOverDp(store, "sglang:max_total_num_tokens"),
+    numUsedTokens: sumOverDp(store, "sglang:num_used_tokens"),
+  }
+
   return {
     ts: Date.now(),
+    engineRole,
+    modelName,
+    endpoint,
     running,
     queued,
     concurrent: running + queued,
@@ -506,6 +705,9 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): S
     tpot,
     e2e,
     queueTime,
+    hasTtft,
+    hasTpot,
+    hasE2e,
     genThroughput,
     outputTokenRate,
     inputTokenRate,
@@ -523,6 +725,10 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): S
     cachedHostTokens,
     specAcceptRate,
     specAcceptLength,
+    perStage,
+    kvTransfer,
+    pdQueues,
+    kvPool,
     perDp: {
       running: perDpValues(store, "sglang:num_running_reqs"),
       queued: perDpValues(store, "sglang:num_queue_reqs"),
@@ -537,6 +743,79 @@ export function buildSnapshot(store: MetricsStore, _prev: SlaSnapshot | null): S
       kv: perDpValues(store, "sglang:token_usage"),
     },
     fetchError: null,
+  }
+}
+
+export function mergePdSnapshots(p: SlaSnapshot, d: SlaSnapshot): SlaSnapshot {
+  const pickHist = (a: HistStats, b: HistStats): HistStats => (b.count > 0 ? b : a)
+  const maxHist = (a: HistStats, b: HistStats): HistStats => (a.count >= b.count ? a : b)
+  const kvAny = (h: HistStats | null): HistStats | null => (h && h.count > 0 ? h : null)
+
+  const pErr = p.fetchError
+  const dErr = d.fetchError
+  const errs = [pErr, dErr].filter((x): x is string => !!x)
+  const fetchError = errs.length > 0 ? errs.join(" | ") : null
+
+  return {
+    ts: Date.now(),
+    engineRole: "pd-disagg",
+    modelName: p.modelName || d.modelName,
+    endpoint: `P ${p.endpoint} · D ${d.endpoint}`,
+    running: p.running + d.running,
+    queued: p.queued + d.queued,
+    concurrent: p.concurrent + d.concurrent,
+    httpActive: p.httpActive + d.httpActive,
+    maxRunning: p.maxRunning,
+    maxQueued: p.maxQueued,
+    ttft: pickHist(p.ttft, d.ttft),
+    tpot: pickHist(p.tpot, d.tpot),
+    e2e: pickHist(p.e2e, d.e2e),
+    queueTime: maxHist(p.queueTime, d.queueTime),
+    hasTtft: d.hasTtft || p.hasTtft,
+    hasTpot: d.hasTpot || p.hasTpot,
+    hasE2e: d.hasE2e || p.hasE2e,
+    genThroughput: d.genThroughput || p.genThroughput,
+    outputTokenRate: d.outputTokenRate || p.outputTokenRate,
+    inputTokenRate: p.inputTokenRate || d.inputTokenRate,
+    totalRequests: Math.max(p.totalRequests, d.totalRequests),
+    abortedRequests: Math.max(p.abortedRequests, d.abortedRequests),
+    l1HitRate: p.l1HitRate || d.l1HitRate,
+    l1HitRateGauge: p.l1HitRateGauge || d.l1HitRateGauge,
+    l1PrefillCacheTokens: p.l1PrefillCacheTokens + d.l1PrefillCacheTokens,
+    l1PrefillComputeTokens: p.l1PrefillComputeTokens + d.l1PrefillComputeTokens,
+    l2Usage: p.l2Usage || d.l2Usage,
+    l2UsedTokens: p.l2UsedTokens + d.l2UsedTokens,
+    l2TotalTokens: p.l2TotalTokens + d.l2TotalTokens,
+    kvUsage: d.kvUsage || p.kvUsage,
+    cachedDeviceTokens: p.cachedDeviceTokens + d.cachedDeviceTokens,
+    cachedHostTokens: p.cachedHostTokens + d.cachedHostTokens,
+    specAcceptRate: d.specAcceptRate || p.specAcceptRate,
+    specAcceptLength: d.specAcceptLength || p.specAcceptLength,
+    perStage: [...p.perStage, ...d.perStage],
+    kvTransfer: {
+      latencyMs: kvAny(p.kvTransfer.latencyMs) ?? kvAny(d.kvTransfer.latencyMs),
+      totalMb: kvAny(p.kvTransfer.totalMb) ?? kvAny(d.kvTransfer.totalMb),
+      speedGbS: kvAny(p.kvTransfer.speedGbS) ?? kvAny(d.kvTransfer.speedGbS),
+      bootstrapMs: kvAny(p.kvTransfer.bootstrapMs) ?? kvAny(d.kvTransfer.bootstrapMs),
+      allocMs: kvAny(p.kvTransfer.allocMs) ?? kvAny(d.kvTransfer.allocMs),
+    },
+    pdQueues: {
+      prefillBootstrap: p.pdQueues.prefillBootstrap,
+      prefillInflight: p.pdQueues.prefillInflight,
+      decodePrealloc: d.pdQueues.decodePrealloc,
+      decodeTransfer: d.pdQueues.decodeTransfer,
+      paused: p.pdQueues.paused + d.pdQueues.paused,
+      retracted: p.pdQueues.retracted + d.pdQueues.retracted,
+    },
+    kvPool: {
+      usedTokens: p.kvPool.usedTokens + d.kvPool.usedTokens,
+      availableTokens: p.kvPool.availableTokens + d.kvPool.availableTokens,
+      evictableTokens: p.kvPool.evictableTokens + d.kvPool.evictableTokens,
+      maxTotalTokens: p.kvPool.maxTotalTokens + d.kvPool.maxTotalTokens,
+      numUsedTokens: p.kvPool.numUsedTokens + d.kvPool.numUsedTokens,
+    },
+    perDp: { running: [], queued: [], gen: [], cache: [], l1: [], kv: [] },
+    fetchError,
   }
 }
 

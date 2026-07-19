@@ -58,9 +58,19 @@ export class Dashboard {
   private dpBox!: BoxRenderable
   private dpText!: TextRenderable
 
+  private pdQueueBox!: BoxRenderable
+  private pdQueueText!: TextRenderable
+  private kvTransferBox!: BoxRenderable
+  private kvTransferText!: TextRenderable
+  private stageBox!: BoxRenderable
+  private stageText!: TextRenderable
+  private kvPoolBox!: BoxRenderable
+  private kvPoolText!: TextRenderable
+
   private topRow!: BoxRenderable
   private midRow!: BoxRenderable
   private bottomRow!: BoxRenderable
+  private pdRow!: BoxRenderable
 
   private interval: ReturnType<typeof setInterval> | null = null
   private running = false
@@ -137,6 +147,19 @@ export class Dashboard {
     this.dpText = this.mkPanelBody("sla-dp-body")
     this.dpBox.add(this.dpText)
 
+    this.pdQueueBox = this.mkPanel("sla-pdq", "PD QUEUES", "#fb7185")
+    this.pdQueueText = this.mkPanelBody("sla-pdq-body")
+    this.pdQueueBox.add(this.pdQueueText)
+    this.kvTransferBox = this.mkPanel("sla-kvt", "KV TRANSFER", "#f472b6")
+    this.kvTransferText = this.mkPanelBody("sla-kvt-body")
+    this.kvTransferBox.add(this.kvTransferText)
+    this.stageBox = this.mkPanel("sla-stage", "PER-STAGE LATENCY", "#a78bfa")
+    this.stageText = this.mkPanelBody("sla-stage-body")
+    this.stageBox.add(this.stageText)
+    this.kvPoolBox = this.mkPanel("sla-kvp", "KV CACHE POOL", "#22d3ee")
+    this.kvPoolText = this.mkPanelBody("sla-kvp-body")
+    this.kvPoolBox.add(this.kvPoolText)
+
     this.topRow.add(this.reqBox)
     this.topRow.add(this.ttftBox)
     this.topRow.add(this.tpotBox)
@@ -149,12 +172,19 @@ export class Dashboard {
 
     this.bottomRow.add(this.dpBox)
 
+    this.pdRow = this.mkRow("sla-pd-row")
+    this.pdRow.add(this.pdQueueBox)
+    this.pdRow.add(this.kvTransferBox)
+    this.pdRow.add(this.stageBox)
+    this.pdRow.add(this.kvPoolBox)
+
     this.root.add(this.header)
     this.root.add(this.subHeader)
     this.root.add(this.statusLine)
     this.root.add(this.topRow)
     this.root.add(this.midRow)
     this.root.add(this.bottomRow)
+    this.root.add(this.pdRow)
 
     this.renderer.root.add(this.root)
   }
@@ -234,7 +264,9 @@ export class Dashboard {
     const ts = now.toLocaleTimeString()
     const err = s.fetchError
 
-    this.header.content = t`${bold(fg("#7dd3fc")("inference-sla"))} ${fg("#64748b")("· SLA dashboard for LLM inference serving")}`
+    const roleTag = this.roleTagChunk(s.engineRole)
+    const modelTag = s.modelName ? ` ${fg("#64748b")("·")} ${fg("#94a3b8")("model:")} ${fg("#cbd5e1")(s.modelName)}` : ""
+    this.header.content = t`${bold(fg("#7dd3fc")("inference-sla"))} ${fg("#64748b")("· SLA dashboard for LLM inference serving")}${roleTag}${modelTag}`
     this.subHeader.content = t`${fg("#94a3b8")("endpoint:")} ${fg("#cbd5e1")(this.opts.endpoint)}  ${fg("#94a3b8")("refresh:")} ${fg("#cbd5e1")(this.opts.refreshMs + "ms")}  ${fg("#94a3b8")("q/Ctrl+C: quit")}`
 
     if (err) {
@@ -244,14 +276,44 @@ export class Dashboard {
     }
 
     this.reqText.content = this.renderRequests(s)
-    this.ttftText.content = this.renderLatency(s.ttft)
-    this.tpotText.content = this.renderLatency(s.tpot)
-    this.e2eText.content = this.renderLatency(s.e2e)
+    this.ttftText.content = s.hasTtft ? this.renderLatency(s.ttft) : this.renderMissingLatency("no TTFT histogram (prefill node)")
+    this.tpotText.content = s.hasTpot ? this.renderLatency(s.tpot) : this.renderMissingLatency("no TPOT histogram (prefill node)")
+    this.e2eText.content = s.hasE2e ? this.renderLatency(s.e2e) : this.renderMissingLatency("no E2E histogram")
     this.queueText.content = this.renderLatency(s.queueTime)
     this.tputText.content = this.renderThroughput(s)
     this.cacheText.content = this.renderCache(s)
     this.specText.content = this.renderSpec(s)
     this.dpText.content = this.renderPerDp(s)
+    this.pdQueueText.content = this.renderPdQueues(s)
+    this.kvTransferText.content = this.renderKvTransfer(s)
+    this.stageText.content = this.renderPerStage(s)
+    this.kvPoolText.content = this.renderKvPool(s)
+  }
+
+  private roleTagChunk(role: SlaSnapshot["engineRole"]): TextChunk {
+    switch (role) {
+      case "prefill":
+        return fg("#fbbf24")(bold(" · [PREFILL]"))
+      case "decode":
+        return fg("#34d399")(bold(" · [DECODE]"))
+      case "unified":
+        return fg("#7dd3fc")(bold(" · [UNIFIED]"))
+      case "pd-disagg":
+        return fg("#f472b6")(bold(" · [PD-DISAGG]"))
+      default:
+        return fg("#475569")("")
+    }
+  }
+
+  private renderMissingLatency(hint: string): StyledTextLike {
+    return t`
+${fg("#475569")("p50 —")}
+${fg("#475569")("p90 —")}
+${fg("#475569")("p99 —")}
+${fg("#475569")("avg —")}
+${fg("#64748b")("(no samples")}
+${fg("#64748b")(hint)}
+`
   }
 
   private capBar(cur: number, max: number, width: number): string {
@@ -381,6 +443,88 @@ ${fg("#64748b")("token per forward pass)")}
       )
     }
     return new StyledText(chunks)
+  }
+
+  private renderPdQueues(s: SlaSnapshot): StyledTextLike {
+    const q = s.pdQueues
+    const qColor = (v: number) => (v > 0 ? yellow : fg("#94a3b8"))
+    return t`
+${bold("PF bootstrap ")} ${qColor(q.prefillBootstrap)(String(q.prefillBootstrap))}
+${bold("PF inflight  ")} ${qColor(q.prefillInflight)(String(q.prefillInflight))}
+${bold("DC prealloc  ")} ${qColor(q.decodePrealloc)(String(q.decodePrealloc))}
+${bold("DC transfer  ")} ${qColor(q.decodeTransfer)(String(q.decodeTransfer))}
+${fg("#64748b")("────")}
+${bold("Paused       ")} ${fg("#cbd5e1")(String(q.paused))}
+${bold("Retracted    ")} ${q.retracted > 0 ? red(String(q.retracted)) : fg("#cbd5e1")(String(q.retracted))}
+${fg("#64748b")("(PF=prefill DC=decode")}
+${fg("#64748b")("disjoint KV transfer queues)")}
+`
+  }
+
+  private renderKvTransfer(s: SlaSnapshot): StyledTextLike {
+    const k = s.kvTransfer
+    const chunks: TextChunk[] = []
+    chunks.push(bold(fg("#94a3b8")("              p50/p90/p99\n")))
+    const pushRow = (label: string, h: { p50: number; p90: number; p99: number; avg: number; count: number } | null, unit: string, last: boolean) => {
+      if (!h || h.count === 0) {
+        chunks.push(bold(label.padEnd(13)), fg("#475569")("  —  (no samples)"))
+      } else {
+        chunks.push(
+          bold(label.padEnd(13)),
+          fg("#cbd5e1")(" " + fmtNum(h.p50) + "/" + fmtNum(h.p90) + "/" + fmtNum(h.p99)),
+          fg("#64748b")(" " + unit + " n=" + fmtNum(h.count)),
+        )
+      }
+      if (!last) chunks.push(fg("#334155")("\n"))
+    }
+    pushRow("latency (ms)", k.latencyMs, "ms", false)
+    pushRow("total (MB)", k.totalMb, "MB", false)
+    pushRow("speed (GB/s)", k.speedGbS, "GB/s", false)
+    pushRow("bootstrap (ms)", k.bootstrapMs, "ms", false)
+    pushRow("alloc (ms)", k.allocMs, "ms", true)
+    return new StyledText(chunks)
+  }
+
+  private renderPerStage(s: SlaSnapshot): StyledTextLike {
+    if (s.perStage.length === 0) {
+      return t`${fg("#475569")("(no per-stage histogram;")}
+${fg("#475569")("unified mode)")}
+`
+    }
+    const chunks: TextChunk[] = [bold(fg("#94a3b8")("stage                            p50     p90     p99    cnt\n"))]
+    for (let i = 0; i < s.perStage.length; i++) {
+      const st = s.perStage[i]
+      const c = st.stage === "chunked_prefill" || st.stage === "decode_transferred" ? yellow : fg("#cbd5e1")
+      const nl = i === s.perStage.length - 1 ? "" : "\n"
+      chunks.push(
+        fg("#7dd3fc")(st.stage.padEnd(32)),
+        c(fmtMs(st.p50).padStart(7)),
+        fg("#475569")("  "),
+        c(fmtMs(st.p90).padStart(7)),
+        fg("#475569")("  "),
+        c(fmtMs(st.p99).padStart(7)),
+        fg("#475569")("  "),
+        fg("#94a3b8")(fmtNum(st.count).padStart(5)),
+        fg("#334155")(nl),
+      )
+    }
+    return new StyledText(chunks)
+  }
+
+  private renderKvPool(s: SlaSnapshot): StyledTextLike {
+    const p = s.kvPool
+    const usage = p.maxTotalTokens > 0 ? p.numUsedTokens / p.maxTotalTokens : 0
+    const usageColor = usage >= 0.9 ? red : usage >= 0.7 ? yellow : green
+    return t`
+${bold("Used / Max   ")} ${fg("#cbd5e1")(fmtNum(p.numUsedTokens) + " / " + fmtNum(p.maxTotalTokens))}
+${bold("KV pool occ.")} ${usageColor(bold(fmtPct(usage)))}
+${fg("#64748b")("────")}
+${bold("KV used      ")} ${fg("#94a3b8")(fmtNum(p.usedTokens))}
+${bold("KV avail.   ")} ${fg("#94a3b8")(fmtNum(p.availableTokens))}
+${bold("KV evictable")} ${fg("#94a3b8")(fmtNum(p.evictableTokens))}
+${fg("#64748b")("(per tp_rank deduped;")}
+${fg("#64748b")("max occ. = num_used / max_total)")}
+`
   }
 
   destroy(): void {

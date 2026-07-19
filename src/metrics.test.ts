@@ -3,6 +3,7 @@ import {
   MetricsStore,
   buildSnapshot,
   histogramQuantile,
+  mergePdSnapshots,
   parsePrometheus,
   fmtMs,
   fmtPct,
@@ -267,5 +268,168 @@ describe("formatters", () => {
     expect(fmtNum(1500)).toBe("1.50k")
     expect(fmtNum(1_500_000)).toBe("1.50M")
     expect(fmtNum(0)).toBe("0")
+  })
+})
+
+const PREFILL_FIXTURE = `
+# TYPE sglang:num_running_reqs gauge
+sglang:num_running_reqs{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# TYPE sglang:num_queue_reqs gauge
+sglang:num_queue_reqs{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+# TYPE sglang:http_requests_active gauge
+sglang:http_requests_active{endpoint="/v1/completions",method="POST"} 1.0
+sglang:http_requests_active{endpoint="/v1/chat/completions",method="POST"} 0.0
+# TYPE sglang:num_prefill_bootstrap_queue_reqs gauge
+sglang:num_prefill_bootstrap_queue_reqs{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 2.0
+# TYPE sglang:per_stage_req_latency_seconds histogram
+sglang:per_stage_req_latency_seconds_bucket{engine_type="prefill",le="0.01",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="prefill_bootstrap",tp_rank="0"} 5.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="prefill",le="0.1",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="prefill_bootstrap",tp_rank="0"} 10.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="prefill",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="prefill_bootstrap",tp_rank="0"} 10.0
+sglang:per_stage_req_latency_seconds_count{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="prefill_bootstrap",tp_rank="0"} 10.0
+sglang:per_stage_req_latency_seconds_sum{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="prefill_bootstrap",tp_rank="0"} 0.5
+# TYPE sglang:kv_transfer_latency_ms histogram
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="1000.0",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="5000.0",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 6.0
+sglang:kv_transfer_latency_ms_bucket{engine_type="prefill",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 12.0
+sglang:kv_transfer_latency_ms_count{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 12.0
+sglang:kv_transfer_latency_ms_sum{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 107754.0
+# TYPE sglang:e2e_request_latency_seconds histogram
+sglang:e2e_request_latency_seconds_count{engine_type="prefill",model_name="glm"} 13.0
+sglang:e2e_request_latency_seconds_sum{engine_type="prefill",model_name="glm"} 510.0
+sglang:e2e_request_latency_seconds_bucket{engine_type="prefill",le="10.0",model_name="glm"} 6.0
+sglang:e2e_request_latency_seconds_bucket{engine_type="prefill",le="50.0",model_name="glm"} 13.0
+sglang:e2e_request_latency_seconds_bucket{engine_type="prefill",le="+Inf",model_name="glm"} 13.0
+# TYPE sglang:queue_time_seconds histogram
+sglang:queue_time_seconds_count{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 67.0
+sglang:queue_time_seconds_sum{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.03
+sglang:queue_time_seconds_bucket{engine_type="prefill",le="0.001",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 64.0
+sglang:queue_time_seconds_bucket{engine_type="prefill",le="0.01",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 67.0
+sglang:queue_time_seconds_bucket{engine_type="prefill",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 67.0
+sglang:queue_time_seconds_count{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 67.0
+sglang:queue_time_seconds_sum{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 0.03
+sglang:queue_time_seconds_bucket{engine_type="prefill",le="0.001",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 64.0
+sglang:queue_time_seconds_bucket{engine_type="prefill",le="0.01",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 67.0
+sglang:queue_time_seconds_bucket{engine_type="prefill",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 67.0
+# TYPE sglang:cache_hit_rate gauge
+sglang:cache_hit_rate{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.76
+# TYPE sglang:token_usage gauge
+sglang:token_usage{engine_type="prefill",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# TYPE sglang:realtime_tokens_total counter
+sglang:realtime_tokens_total{engine_type="prefill",mode="prefill_cache",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 470.0
+sglang:realtime_tokens_total{engine_type="prefill",mode="prefill_compute",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 146.0
+# TYPE sglang:num_requests_total counter
+sglang:num_requests_total{engine_type="prefill",model_name="glm"} 13.0
+# TYPE sglang:num_aborted_requests_total counter
+sglang:num_aborted_requests_total{engine_type="prefill",model_name="glm"} 1.0
+`
+
+const DECODE_FIXTURE = `
+# TYPE sglang:num_running_reqs gauge
+sglang:num_running_reqs{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+# TYPE sglang:num_queue_reqs gauge
+sglang:num_queue_reqs{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# TYPE sglang:http_requests_active gauge
+sglang:http_requests_active{endpoint="/v1/chat/completions",method="POST"} 1.0
+# TYPE sglang:time_to_first_token_seconds histogram
+sglang:time_to_first_token_seconds_count{engine_type="decode",model_name="glm"} 15.0
+sglang:time_to_first_token_seconds_sum{engine_type="decode",model_name="glm"} 190.0
+sglang:time_to_first_token_seconds_bucket{engine_type="decode",le="10.0",model_name="glm"} 3.0
+sglang:time_to_first_token_seconds_bucket{engine_type="decode",le="20.0",model_name="glm"} 14.0
+sglang:time_to_first_token_seconds_bucket{engine_type="decode",le="+Inf",model_name="glm"} 15.0
+# TYPE sglang:inter_token_latency_seconds histogram
+sglang:inter_token_latency_seconds_count{engine_type="decode",model_name="glm"} 1000.0
+sglang:inter_token_latency_seconds_sum{engine_type="decode",model_name="glm"} 12.5
+sglang:inter_token_latency_seconds_bucket{engine_type="decode",le="0.01",model_name="glm"} 500.0
+sglang:inter_token_latency_seconds_bucket{engine_type="decode",le="0.02",model_name="glm"} 1000.0
+sglang:inter_token_latency_seconds_bucket{engine_type="decode",le="+Inf",model_name="glm"} 1000.0
+# TYPE sglang:per_stage_req_latency_seconds histogram
+sglang:per_stage_req_latency_seconds_bucket{engine_type="decode",le="0.001",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="decode_prepare",tp_rank="0"} 5.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="decode",le="0.01",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="decode_prepare",tp_rank="0"} 23.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="decode",le="+Inf",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="decode_prepare",tp_rank="0"} 23.0
+sglang:per_stage_req_latency_seconds_count{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="decode_prepare",tp_rank="0"} 23.0
+sglang:per_stage_req_latency_seconds_sum{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",stage="decode_prepare",tp_rank="0"} 0.02
+# TYPE sglang:gen_throughput gauge
+sglang:gen_throughput{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 70.0
+# TYPE sglang:token_usage gauge
+sglang:token_usage{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.33
+# TYPE sglang:num_requests_total counter
+sglang:num_requests_total{engine_type="decode",model_name="glm"} 14.0
+# TYPE sglang:num_aborted_requests_total counter
+sglang:num_aborted_requests_total{engine_type="decode",model_name="glm"} 0.0
+# TYPE sglang:num_decode_transfer_queue_reqs gauge
+sglang:num_decode_transfer_queue_reqs{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 3.0
+# TYPE sglang:kv_used_tokens gauge
+sglang:kv_used_tokens{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 145856.0
+# TYPE sglang:max_total_num_tokens gauge
+sglang:max_total_num_tokens{engine_type="decode",model_name="glm",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 441792.0
+`
+
+describe("PD-disaggregated mode", () => {
+  test("prefill snapshot detects role, httpActive fallback, missing TTFT/TPOT", () => {
+    const store = new MetricsStore()
+    store.ingest(PREFILL_FIXTURE)
+    const snap = buildSnapshot(store, null, "http://p/metrics")
+    expect(snap.engineRole).toBe("prefill")
+    expect(snap.httpActive).toBe(1)
+    expect(snap.hasTtft).toBe(false)
+    expect(snap.hasTpot).toBe(false)
+    expect(snap.hasE2e).toBe(true)
+    expect(snap.pdQueues.prefillBootstrap).toBe(2)
+    expect(snap.perStage.length).toBe(1)
+    expect(snap.perStage[0].stage).toBe("prefill_bootstrap")
+    expect(snap.kvTransfer.latencyMs!.count).toBe(12)
+    expect(snap.l1HitRate).toBeCloseTo(470 / (470 + 146), 5)
+  })
+
+  test("decode snapshot detects role and TTFT/TPOT present", () => {
+    const store = new MetricsStore()
+    store.ingest(DECODE_FIXTURE)
+    const snap = buildSnapshot(store, null, "http://d/metrics")
+    expect(snap.engineRole).toBe("decode")
+    expect(snap.hasTtft).toBe(true)
+    expect(snap.hasTpot).toBe(true)
+    expect(snap.ttft.count).toBe(15)
+    expect(snap.tpot.count).toBe(1000)
+    expect(snap.genThroughput).toBe(70)
+    expect(snap.kvUsage).toBeCloseTo(0.33, 5)
+    expect(snap.pdQueues.decodeTransfer).toBe(3)
+  })
+
+  test("histSumBucketsAcrossDp dedups buckets across tp_rank (no 4x inflation)", () => {
+    const store = new MetricsStore()
+    store.ingest(PREFILL_FIXTURE)
+    const h = store.histSumBucketsAcrossDp("sglang:queue_time_seconds", undefined, "dp_rank")
+    expect(h).not.toBeNull()
+    expect(h!.count).toBe(67)
+    const cum = h!.buckets.find((b) => b.le === 0.001)!.cum
+    expect(cum).toBe(64)
+  })
+
+  test("mergePdSnapshots combines prefill+decode into pd-disagg view", () => {
+    const pStore = new MetricsStore()
+    pStore.ingest(PREFILL_FIXTURE)
+    const dStore = new MetricsStore()
+    dStore.ingest(DECODE_FIXTURE)
+    const p = buildSnapshot(pStore, null, "http://p/metrics")
+    const d = buildSnapshot(dStore, null, "http://d/metrics")
+    const m = mergePdSnapshots(p, d)
+    expect(m.engineRole).toBe("pd-disagg")
+    expect(m.running).toBe(1)
+    expect(m.queued).toBe(1)
+    expect(m.httpActive).toBe(2)
+    expect(m.hasTtft).toBe(true)
+    expect(m.ttft.count).toBe(15)
+    expect(m.hasTpot).toBe(true)
+    expect(m.tpot.count).toBe(1000)
+    expect(m.genThroughput).toBe(70)
+    expect(m.kvUsage).toBeCloseTo(0.33, 5)
+    expect(m.l1HitRate).toBeCloseTo(470 / (470 + 146), 5)
+    expect(m.pdQueues.prefillBootstrap).toBe(2)
+    expect(m.pdQueues.decodeTransfer).toBe(3)
+    expect(m.perStage.length).toBe(2)
+    expect(m.kvPool.maxTotalTokens).toBe(441792)
+    expect(m.kvPool.usedTokens).toBe(145856)
+    expect(m.endpoint).toContain("P http://p/metrics")
+    expect(m.endpoint).toContain("D http://d/metrics")
   })
 })

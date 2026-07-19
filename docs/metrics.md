@@ -226,8 +226,93 @@ sglang 暴露的指标通常带以下标签，本工具按这些标签做聚合 
 
 ---
 
+## 八、PD 分离部署（Prefill / Decode Disaggregated）
+
+sglang 的 PD 分离部署把 prefill 与 decode 拆到两套 worker（同机或跨机），通过 KV cache 转移协同。本工具通过 `engine_type` 标签自动识别角色，并支持双端点合并视图。
+
+### 8.1 角色探测
+
+`detectEngineRole` 从 `sglang:num_running_reqs` / `gen_throughput` / `token_usage` 的 `engine_type` 标签推断：
+
+| engine_type | EngineRole | 含义 |
+|---|---|---|
+| `unified` | `unified` | 单体部署（原模式） |
+| `prefill` | `prefill` | PD 分离的 prefill worker |
+| `decode` | `decode` | PD 分离的 decode worker |
+| 两者同时出现或缺失 | `unknown` | 未知 |
+
+多端点输入且分别为 prefill + decode 时，`mergePdSnapshots` 产出的合并 snapshot 角色标为 `pd-disagg`，仪表盘标题栏显示 `[PD-DISAGG]`。
+
+### 8.2 PD 模式下的指标差异
+
+| 指标 | prefill 端 | decode 端 | 合并策略 |
+|---|---|---|---|
+| `sglang:time_to_first_token_seconds` | ❌ 不存在 | ✓ 存在 | 取 decode |
+| `sglang:inter_token_latency_seconds` | ❌ 不存在 | ✓ 存在 | 取 decode |
+| `sglang:e2e_request_latency_seconds` | ✓（prefill 视角） | ✓（用户视角） | 取 decode |
+| `sglang:gen_throughput` / 生成 token 速率 | 0 | >0 | 取 decode |
+| `sglang:prompt_tokens_total` 速率 | >0 | >0 | 取 prefill（prefill 处理 prompt） |
+| `sglang:cache_hit_rate` / L1 命中 | >0 | 0 | 取 prefill（radix cache 在 prefill 端） |
+| `sglang:hicache_host_*` L2 | ✓ | ❌ | 取 prefill |
+| `sglang:token_usage` | 0 | >0 | 取 decode（decode 端 KV 池是瓶颈） |
+| `sglang:spec_accept_*` | 0 | >0 | 取 decode |
+| `sglang:num_requests_total` / aborted | 各自计数 | 各自计数 | 取 max（避免双计同一请求） |
+
+### 8.3 PD 专属指标
+
+| metric | 类型 | 标签 | 聚合 | 物理含义 |
+|---|---|---|---|---|
+| `sglang:per_stage_req_latency_seconds` | histogram | `engine_type, model_name, moe_ep_rank, pp_rank, tp_rank, stage` | 按 `stage` 分组，每组建一条 histogram 后算分位数 | PD 各阶段延迟。prefill 端 stage：`prefill_bootstrap` / `prefill_forward` / `prefill_transfer_kv_cache` / `chunked_prefill`；decode 端 stage：`decode_prepare` / `decode_bootstrap` / `decode_transferred` / `decode_waiting` / `fake_output`。 |
+| `sglang:kv_transfer_latency_ms` | histogram | `engine_type, model_name, moe_ep_rank, pp_rank, tp_rank` | `histogramByName` | 单次 KV cache 转移延迟（ms）。仅 prefill 端有样本（发送方视角）。 |
+| `sglang:kv_transfer_total_mb` | histogram | 同上 | `histogramByName` | 单次 KV 转移总量（MB）。 |
+| `sglang:kv_transfer_speed_gb_s` | histogram | 同上 | `histogramByName` | KV 转移吞吐速率（GB/s）。 |
+| `sglang:kv_transfer_bootstrap_ms` | histogram | 同上 | `histogramByName` | KV 转移 bootstrap 延迟（ms），两端均有样本。 |
+| `sglang:kv_transfer_alloc_ms` | histogram | 同上 | `histogramByName` | KV 转移内存分配延迟（ms）。 |
+| `sglang:num_prefill_bootstrap_queue_reqs` | gauge | `engine_type, model_name, moe_ep_rank, pp_rank, tp_rank` | `sumOverDp`（按 tp_rank 去重） | 等待 prefill bootstrap 的请求数。 |
+| `sglang:num_prefill_inflight_queue_reqs` | gauge | 同上 | `sumOverDp` | prefill inflight（正在 prefill）队列请求数。 |
+| `sglang:num_decode_prealloc_queue_reqs` | gauge | 同上 | `sumOverDp` | 等待 decode 预分配的请求数。 |
+| `sglang:num_decode_transfer_queue_reqs` | gauge | 同上 | `sumOverDp` | 等待 KV 转移到 decode 的请求数。 |
+| `sglang:num_paused_reqs` | gauge | 同上 + `pid` | `sumOverDp` | 暂停请求数（被抢占等）。 |
+| `sglang:num_retracted_reqs` | gauge | 同上 + `pid` | `sumOverDp` | 回退请求数。 |
+| `sglang:kv_used_tokens` | gauge | 同上 | `sumOverDp` | KV cache 池已用 token 数。 |
+| `sglang:kv_available_tokens` | gauge | 同上 | `sumOverDp` | KV cache 池可用 token 数。 |
+| `sglang:kv_evictable_tokens` | gauge | 同上 | `sumOverDp` | KV cache 池可驱逐 token 数。 |
+| `sglang:max_total_num_tokens` | gauge | 同上 | `sumOverDp` | KV cache 池总容量（token 数），合并时两端相加。 |
+| `sglang:num_used_tokens` | gauge | 同上 | `sumOverDp` | 实际使用 token 数（含 radix cache 占用）。 |
+
+### 8.4 聚合行为修正（惠及统一模式）
+
+- **`histSumBucketsAcrossDp` 桶通胀修复**：原实现直接累加所有 `_bucket` 样本，在「同 dp_rank 内多 tp_rank 重复上报」或「dp_rank 缺失（PD 模式）」时导致桶累积值 4× 膨胀，count 去重正确但分位数插值落点错位（p50 被低估至约 1/4 真实值）。修复后先按 `groupBy` 分组、组内按 `le` 去重再跨组求和，统一与 PD 模式均正确。
+- **HTTP 端点回退**：`http_requests_active` 优先级 `/v1/chat/completions` → `/v1/completions` → `/generate`，PD prefill 端仅暴露 `/v1/completions` 时不再误报 0。
+- **NaN 过滤**：`fwd_occupancy` 等可能为 NaN 的 gauge 通过 `safeNum` 归零。
+
+### 8.5 mergePdSnapshots 字段映射
+
+| 合并字段 | 来源 |
+|---|---|
+| `engineRole` | `"pd-disagg"` |
+| `endpoint` | `P <p.endpoint> · D <d.endpoint>` |
+| `running` / `queued` / `concurrent` / `httpActive` | p + d 求和 |
+| `ttft` / `tpot` / `e2e` / `hasTtft` / `hasTpot` / `hasE2e` | 取 decode 端（decode 无样本时回退 prefill） |
+| `queueTime` | 取 count 较大者 |
+| `genThroughput` / `outputTokenRate` | 取 decode |
+| `inputTokenRate` | 取 prefill |
+| `totalRequests` / `abortedRequests` | max(p, d) |
+| `l1HitRate` / `l1HitRateGauge` / `l2Usage` / `l2UsedTokens` / `l2TotalTokens` / `cachedDeviceTokens` / `cachedHostTokens` | 取 prefill（+ decode 加和，decode 端通常为 0） |
+| `kvUsage` / `specAcceptRate` / `specAcceptLength` | 取 decode |
+| `perStage` | `[...p.perStage, ...d.perStage]` |
+| `kvTransfer.*` | 取有样本的一端（通常 prefill 端 4 个直方图齐全，decode 端仅 bootstrap/alloc） |
+| `pdQueues.prefillBootstrap` / `prefillInflight` | 取 prefill |
+| `pdQueues.decodePrealloc` / `decodeTransfer` | 取 decode |
+| `pdQueues.paused` / `retracted` | p + d 求和 |
+| `kvPool.*` | p + d 求和 |
+| `perDp.*` | `[]`（PD 模式无 dp_rank 维度） |
+| `fetchError` | 两端 error 拼接（` | `分隔） |
+
+---
+
 ## 参考资料
 
 - sglang 仓库：<https://github.com/sgl-project/sglang>（启动参数 `--enable-metrics`、`--enable-hierarchical-cache`）
 - Prometheus 直方图分位数算法：<https://prometheus.io/docs/prometheus/latest/querying/functions/#histogram_quantile>
-- 本仓库实现见 `src/metrics.ts:445`（`buildSnapshot`）与 `src/dashboard.ts:232`（`render`）。
+- 本仓库实现见 `src/metrics.ts` 的 `buildSnapshot`（含 PD 角色探测与 PD 指标采集）、`mergePdSnapshots`（PD 合并）、`perStageLatencies`（按 stage 分组），以及 `src/dashboard.ts` 的 `render` 与 PD 专用面板渲染函数（`renderPdQueues` / `renderKvTransfer` / `renderPerStage` / `renderKvPool`）。
